@@ -1,0 +1,35 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Runtime logs
+*.log
+
+# Local caches and model weights
+.cache/
+
+# Local Chroma indexes can be very large. Upload them separately if needed.
+chroma_db/
+chroma_db_qa_hybrid/
+chroma_db_qa_test/
+
+# Large raw dataset. Keep a download link or Kaggle reference in the report.
+vietnamese_vqa_dataset.json
+
+# Local memory state
+user_memories.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,17 @@
+chromadb
+google-genai
+ipykernel
+jupyter
+langchain
+langchain-chroma
+langchain-community
+langchain-core
+langchain-google-genai
+langchain-huggingface
+langgraph
+pydantic
+python-dotenv
+sentence-transformers
+streamlit
+torch
+transformers

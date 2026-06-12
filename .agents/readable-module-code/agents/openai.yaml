@@ -1,0 +1,4 @@
+interface:
+  display_name: "Readable Module Code"
+  short_description: "Clear modular code with helpful comments"
+  default_prompt: "Use $readable-module-code to write or refactor this code so it is easy to understand, uses meaningful names, includes helpful comments for each major part, and is organized into modules/functions."

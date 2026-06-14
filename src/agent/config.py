@@ -2,16 +2,15 @@
 Cấu hình runtime cho VietCulture memory agent.
 
 Mục đích file:
-Đọc `.env`, chọn Chroma index, cấu hình embedding/runtime, và ép cache
-HuggingFace nằm trong thư mục project để dễ quản lý khi demo.
+Đọc `.env`, chọn Chroma index baseline đã build trên Kaggle, cấu hình
+embedding/runtime, và ép cache HuggingFace nằm trong thư mục project để dễ quản
+lý khi demo.
 
 Luồng xử lý:
 load_agent_settings()
 -> load `.env`
 -> configure_huggingface_cache()
--> chọn Chroma profile:
-   legacy: chroma_db / langchain
-   hybrid: chroma_db_qa_hybrid / qa_hybrid_chunks
+-> chọn Chroma baseline: chroma_db / langchain
 -> trả AgentSettings cho graph.py và retriever.py
 """
 
@@ -32,7 +31,7 @@ class AgentSettings:
     Biến quan trọng:
     - project_root: thư mục gốc project.
     - memory_file: file JSON lưu long-term memory.
-    - retriever_profile: `legacy` dùng chroma_db, `hybrid` dùng chroma_db_qa_hybrid.
+    - retriever_profile: hiện giữ để tương thích, mặc định dùng `legacy`.
     - persist_dir: thư mục Chroma thực tế.
     - collection_name: tên collection trong Chroma.
     - embed_model/device: model embedding dùng lúc query runtime.
@@ -94,13 +93,14 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
     Đọc toàn bộ settings từ `.env` và biến môi trường.
 
     Ví dụ output hiện tại:
-    retriever_profile="legacy"
-    persist_dir="D:/Ds107/chroma_db"
-    collection_name="langchain"
+        retriever_profile="legacy"
+        persist_dir="D:/Ds107/chroma_db"
+        collection_name="langchain"
 
     Cách tự viết lại:
-    Load `.env`, chọn default index theo profile, cho phép env override, rồi
-    ép kiểu int/float cho các tham số retrieval.
+    Load `.env`, đặt default index là `chroma_db/langchain`, cho phép env
+    override khi cần test index khác, rồi ép kiểu int/float cho các tham số
+    retrieval.
     """
 
     root = Path(project_root or Path.cwd()).resolve()
@@ -108,12 +108,8 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
     configure_huggingface_cache(root)
 
     retriever_profile = os.getenv("QA_RETRIEVER_PROFILE", "legacy").strip().lower()
-    if retriever_profile == "hybrid":
-        default_index_dir = root / "chroma_db_qa_hybrid"
-        default_collection_name = "qa_hybrid_chunks"
-    else:
-        default_index_dir = root / "chroma_db"
-        default_collection_name = "langchain"
+    default_index_dir = root / "chroma_db"
+    default_collection_name = "langchain"
 
     persist_dir = Path(os.getenv("QA_CHROMA_DIR", default_index_dir))
     collection_name = os.getenv("QA_CHROMA_COLLECTION", default_collection_name)

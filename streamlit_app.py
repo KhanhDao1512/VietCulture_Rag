@@ -446,34 +446,6 @@ def inject_global_styles() -> None:
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
         }
 
-        .vc-hf-test {
-            position: relative;
-            z-index: 2;
-            display: grid;
-            grid-template-columns: 92px 1fr;
-            gap: 0.8rem;
-            align-items: center;
-            margin-top: 1rem;
-            padding: 0.75rem;
-            background: rgba(255, 250, 241, 0.78);
-            border: 1px solid rgba(220, 167, 91, 0.16);
-            border-radius: 18px;
-        }
-
-        .vc-hf-test img {
-            width: 92px;
-            height: 72px;
-            object-fit: cover;
-            border-radius: 14px;
-        }
-
-        .vc-hf-test p {
-            margin: 0;
-            color: #4b5563;
-            font-size: 0.92rem;
-            line-height: 1.45;
-        }
-
         .vc-cards {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -956,13 +928,6 @@ def render_welcome_screen() -> None:
                         Mình có thể giúp bạn tìm hiểu nguồn gốc, cách dùng, hoặc gợi ý chủ đề
                         ẩm thực liên quan từ dataset.
                     </div>
-                </div>
-                <div class="vc-hf-test">
-                    <img src="{HF_BANH_BAO_IMAGE_URL}" alt="Ảnh bánh bao từ Hugging Face">
-                    <p>
-                        Test ảnh Hugging Face: nếu bạn thấy ảnh này, Streamlit đang render được
-                        remote image từ dataset.
-                    </p>
                 </div>
                 <div class="vc-mini-input">Nhập câu hỏi của bạn...</div>
             </div>

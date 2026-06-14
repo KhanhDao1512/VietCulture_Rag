@@ -1,0 +1,399 @@
+% ACL 2023/2024 style report.
+% Tiếng Việt có dấu: compile bằng XeLaTeX + BibTeX.
+% Overleaf: Menu -> Compiler -> XeLaTeX.
+\documentclass[11pt]{article}
+
+\usepackage[hyperref]{acl}
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[utf8]{inputenc}
+  \usepackage[T5]{fontenc}
+  \usepackage[vietnamese,english]{babel}
+  \usepackage{times}
+  \usepackage{inconsolata}
+\else
+  \usepackage{fontspec}
+  \IfFontExistsTF{Times New Roman}{
+    \setmainfont{Times New Roman}
+  }{
+    \setmainfont{TeX Gyre Termes}
+  }
+  \IfFontExistsTF{Arial}{
+    \setsansfont{Arial}
+  }{
+    \setsansfont{TeX Gyre Heros}
+  }
+  \IfFontExistsTF{Consolas}{
+    \setmonofont{Consolas}
+  }{
+    \setmonofont{DejaVu Sans Mono}
+  }
+\fi
+\usepackage{latexsym}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{amsmath,amssymb}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning}
+
+\newcommand{\optionalfigure}[3]{
+  \IfFileExists{#1}{
+    \includegraphics[width=#2]{#1}
+  }{
+    \fbox{
+      \begin{minipage}[c][0.22\textheight][c]{#2}
+      \centering
+      \small Chèn hình minh họa tại đây:\\
+      \texttt{\detokenize{#1}}\\[0.5em]
+      #3
+      \end{minipage}
+    }
+  }
+}
+
+\title{Trợ lý hỏi đáp và gợi ý chủ đề văn hóa Việt Nam\\theo hướng cá nhân hóa dựa trên RAG}
+
+\author{
+  Đào Tuấn Khanh \quad
+  Thái Xuân Thành \quad
+  Bùi Đức Gia Huy \quad
+  Nguyễn Lê Duy Đại \\
+  Trường Đại học Công nghệ Thông tin, ĐHQG-HCM \\
+  \texttt{\{24520779,24521638,24520650,24520246\}@gm.uit.edu.vn}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Bài báo trình bày VietCulture Assistant, một hệ thống hỏi đáp và gợi ý một số chủ đề văn hóa Việt Nam theo hướng cá nhân hóa. Thay vì triển khai pipeline RAG tuyến tính cho mọi tin nhắn, hệ thống sử dụng intent routing để tách các trường hợp hỏi đáp tri thức, cập nhật sở thích, truy vấn bộ nhớ, yêu cầu gợi ý, trò chuyện xã giao và ngoài phạm vi. Với câu hỏi tri thức, hệ thống truy hồi các đoạn QA đã nhúng bằng \textit{intfloat/multilingual-e5-base} trong ChromaDB và sinh câu trả lời bằng Gemini dựa trên tài liệu. Với yêu cầu gợi ý, hệ thống dùng long-term memory theo người dùng để tạo truy vấn cá nhân hóa, nhưng nội dung gợi ý vẫn được ràng buộc bởi các tài liệu retrieve được. Trên bộ kiểm thử nhẹ, hệ thống đạt 5/5 ca intent routing và 4/4 ca retrieval. Kết quả cho thấy việc kết hợp RAG, routing và memory giúp xây dựng một trợ lý văn hóa có căn cứ, dễ kiểm soát và có khả năng cá nhân hóa.
+\end{abstract}
+
+\section{Giới thiệu}
+
+Các mô hình ngôn ngữ lớn có khả năng tạo câu trả lời tự nhiên, nhưng thường gặp rủi ro sinh thông tin không có căn cứ khi trả lời về miền tri thức chuyên biệt. Với các chủ đề văn hóa, rủi ro này càng đáng chú ý vì tri thức liên quan đến bối cảnh lịch sử, vùng miền, tập tục và ý nghĩa biểu tượng. Retrieval-Augmented Generation (RAG)~\citep{lewis2020retrieval} là một hướng tiếp cận phổ biến để giảm hallucination: hệ thống truy hồi tài liệu liên quan rồi yêu cầu mô hình sinh câu trả lời dựa trên tài liệu đó.
+
+Tuy nhiên, trong một chatbot thực tế, không phải mọi lượt tương tác đều là câu hỏi tri thức. Người dùng có thể chào hỏi, nói sở thích, hỏi hệ thống đang nhớ gì, hoặc yêu cầu gợi ý chủ đề tiếp theo. Nếu mọi tin nhắn đều đi qua RAG, hệ thống dễ tốn chi phí, tăng độ trễ và có thể lưu sai thông tin cá nhân. Ví dụ, câu ``ý nghĩa văn hóa của bóng chuyền bãi biển là gì'' không nên được hiểu là người dùng thích thể thao; ngược lại, câu ``tôi thích thể thao'' mới là tín hiệu cập nhật memory.
+
+Từ vấn đề trên, chúng tôi xây dựng VietCulture Assistant, một hệ thống hỏi đáp và gợi ý chủ đề văn hóa Việt Nam theo hướng cá nhân hóa. Đóng góp chính của project gồm:
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item Thiết kế pipeline agent có intent routing trước RAG, giúp tách các hành vi hỏi đáp, memory và recommendation.
+    \item Xây dựng long-term memory theo \textit{user\_id}, chỉ lưu sở thích khi người dùng phát biểu rõ ràng.
+    \item Tạo recommendation cá nhân hóa dựa trên memory nhưng vẫn grounded trên tài liệu retrieve từ ChromaDB.
+    \item Triển khai giao diện Streamlit cho demo multi-user, debug routing/retrieval và hiển thị ảnh từ Hugging Face dataset.
+\end{itemize}
+
+\section{Cơ sở lý thuyết}
+
+\subsection{Retrieval-Augmented Generation}
+
+RAG kết hợp một retriever và một generator. Retriever tìm các tài liệu liên quan đến truy vấn, còn generator dùng các tài liệu này làm ngữ cảnh để sinh câu trả lời. Khác với mô hình chỉ dựa vào tham số nội tại, RAG cho phép cập nhật tri thức thông qua kho tài liệu ngoài, đồng thời cung cấp cơ sở để kiểm tra câu trả lời. Trong project này, RAG được dùng cho các câu hỏi văn hóa cần bằng chứng từ dataset.
+
+\subsection{Embedding và vector database}
+
+Embedding biến văn bản thành vector trong không gian liên tục, nơi các văn bản gần nhau về nghĩa có xu hướng gần nhau về khoảng cách. Project sử dụng mô hình \textit{intfloat/multilingual-e5-base}, thuộc họ E5~\citep{wang2022text}, với quy ước thêm tiền tố \textit{query:} cho truy vấn và \textit{passage:} cho tài liệu. Các vector được lưu trong ChromaDB~\citep{chroma}, cho phép similarity search trên tập QA chunks.
+
+\subsection{Intent routing và agentic workflow}
+
+Intent routing là bước phân loại mục đích của tin nhắn trước khi chọn module xử lý. Trong hệ thống này, routing giúp tránh đưa các câu như ``tôi thích kiến trúc'' vào RAG, đồng thời đảm bảo memory chỉ cập nhật khi có tín hiệu rõ. LangGraph~\citep{langgraph} được dùng để tổ chức pipeline thành graph có điều kiện, nhờ đó hệ thống có thể rẽ nhánh giữa RAG, memory, recommendation và chitchat.
+
+\subsection{Cá nhân hóa bằng long-term memory}
+
+Cá nhân hóa trong project không nhằm dự đoán sâu hành vi người dùng, mà tập trung vào một dạng memory có kiểm soát: các sở thích người dùng tự khai báo. Memory này được dùng để điều chỉnh recommendation và làm ngữ cảnh phụ khi sinh câu trả lời. Quan trọng hơn, memory không được dùng như bằng chứng tri thức; bằng chứng vẫn phải đến từ tài liệu retrieve được.
+
+\section{Dữ liệu}
+
+Project sử dụng Vietnamese Cultural VQA dataset trên Hugging Face~\citep{vietculturalvqa}. Dataset gồm ảnh văn hóa Việt Nam và các cặp hỏi--đáp kèm metadata. Mỗi mẫu có các trường như \textit{image\_id}, \textit{image\_path}, \textit{category}, \textit{keyword}, \textit{image\_analysis}, \textit{cultural\_context} và danh sách câu hỏi. Các nhóm chủ đề bao gồm ẩm thực, kiến trúc, lễ hội, phong cảnh, trang phục, đời sống hằng ngày, giao thông, thủ công mỹ nghệ, nhạc cụ, văn hóa dân gian, trò chơi dân gian và thể thao truyền thống.
+
+Phạm vi hệ thống được giới hạn ở các chủ đề có trong dataset. Do đó, cụm ``văn hóa Việt Nam'' trong project được hiểu là một tập chủ đề văn hóa đại diện do dataset cung cấp, không phải toàn bộ tri thức văn hóa Việt Nam.
+
+\section{Bài toán và yêu cầu thiết kế}
+
+\subsection{Phát biểu bài toán}
+
+Cho một tin nhắn tiếng Việt của người dùng \(x\), lịch sử hội thoại ngắn hạn \(H\), memory dài hạn của người dùng \(M_u\), và kho tri thức \(D\) được biểu diễn dưới dạng các QA chunks, hệ thống cần sinh phản hồi \(y\) phù hợp với mục đích tương tác. Nếu \(x\) là câu hỏi tri thức, \(y\) phải được tạo dựa trên các tài liệu truy hồi từ \(D\). Nếu \(x\) là câu nói sở thích, hệ thống cần cập nhật \(M_u\) thay vì sinh câu trả lời RAG. Nếu \(x\) là yêu cầu gợi ý, hệ thống cần dùng \(M_u\) để truy hồi các chủ đề phù hợp trong \(D\).
+
+Bài toán vì vậy không chỉ là question answering, mà là một bài toán điều phối nhiều hành vi hội thoại. Mục tiêu của hệ thống gồm ba tiêu chí: (i) trả lời có căn cứ khi cần tri thức, (ii) cá nhân hóa dựa trên sở thích được khai báo rõ ràng, và (iii) tránh lưu hoặc suy diễn thông tin cá nhân sai.
+
+\subsection{Yêu cầu thiết kế}
+
+Từ phát biểu trên, chúng tôi đặt ra bốn yêu cầu thiết kế.
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+    \item \textbf{Groundedness}: các câu trả lời tri thức phải dựa trên tài liệu truy hồi, không dùng memory như bằng chứng factual.
+    \item \textbf{Intent awareness}: hệ thống phải phân biệt câu hỏi tri thức, câu cập nhật sở thích, câu hỏi memory và yêu cầu recommendation.
+    \item \textbf{Controlled personalization}: memory chỉ được cập nhật từ phát biểu sở thích rõ ràng, ví dụ ``tôi thích lễ hội''.
+    \item \textbf{Reproducibility}: các thành phần chính như chunking, retrieval, routing và evaluation cần được tách module để dễ kiểm thử và tái chạy.
+\end{enumerate}
+
+Các yêu cầu này dẫn đến lựa chọn kiến trúc agent có routing trước RAG, thay vì gọi retriever/generator trực tiếp cho mọi tin nhắn.
+
+\section{Phương pháp}
+
+\subsection{Kiến trúc hệ thống}
+
+Hình~\ref{fig:pipeline} minh họa kiến trúc hệ thống ở mức end-to-end. Thành phần giao diện Streamlit đóng vai trò thu nhận tin nhắn, quản lý \textit{User ID}/\textit{Conversation} và hiển thị kết quả. Thành phần LangGraph Agent chịu trách nhiệm điều phối logic hội thoại. Bên trong agent, memory được nạp trước khi routing để mọi quyết định recommendation hoặc generation đều có thể tham chiếu hồ sơ người dùng hiện tại. Sau đó, hybrid intent router quyết định tin nhắn thuộc nhánh nào: cập nhật memory, đọc memory, gợi ý, RAG, chitchat hoặc ngoài phạm vi.
+
+Điểm cốt lõi của kiến trúc là RAG không nằm ở đầu pipeline mà chỉ là một nhánh được kích hoạt khi cần. Với \textit{rag\_question} và \textit{followup\_question}, hệ thống rewrite query, retrieve từ ChromaDB, sinh câu trả lời bằng Gemini và kiểm tra groundedness/usefulness. Với \textit{recommendation\_request}, hệ thống cũng dùng retriever nhưng không chạy full answer generation; thay vào đó, nó tạo danh sách gợi ý có căn cứ từ các chunks retrieve được. Với \textit{preference\_update} và \textit{memory\_query}, hệ thống thao tác trực tiếp với long-term memory.
+
+\begin{figure*}[t]
+\centering
+\resizebox{0.98\textwidth}{!}{
+\begin{tikzpicture}[
+    node distance=0.72cm and 1.05cm,
+    box/.style={draw, rounded corners=2pt, fill=blue!7, minimum width=2.65cm, minimum height=0.65cm, align=center, font=\small},
+    decision/.style={diamond, draw, fill=orange!15, aspect=2.1, align=center, font=\small},
+    memorybox/.style={draw, rounded corners=2pt, fill=purple!9, minimum width=2.65cm, minimum height=0.65cm, align=center, font=\small},
+    dbbox/.style={draw, cylinder, shape border rotate=90, aspect=0.25, fill=gray!12, minimum width=1.8cm, minimum height=1.1cm, align=center, font=\small},
+    terminal/.style={draw, rounded corners=4pt, fill=green!10, minimum width=2.15cm, minimum height=0.65cm, align=center, font=\small},
+    arr/.style={->, thick}
+]
+\node[terminal] (user) {User};
+\node[box, right=of user] (ui) {Streamlit UI\\User ID + Chat};
+\node[box, right=of ui] (agent) {LangGraph\\Agent};
+\node[memorybox, right=of agent] (loadmem) {Load long-term\\memory};
+\node[box, right=of loadmem] (router) {Hybrid intent\\router};
+
+\node[memorybox, above right=0.05cm and 1.05cm of router] (pref) {Preference\\update};
+\node[memorybox, below=0.65cm of pref] (memquery) {Memory\\query};
+\node[box, below=0.65cm of memquery] (recquery) {Build recommendation\\query};
+\node[box, below=0.65cm of recquery] (rewrite) {Rewrite RAG\\query};
+\node[box, below=0.65cm of rewrite] (smalltalk) {Chitchat /\\Out-of-scope};
+
+\node[dbbox, right=1.35cm of recquery] (chroma) {ChromaDB\\QA chunks};
+\node[box, right=1.35cm of rewrite] (retrieve) {Retrieve +\\lexical rerank};
+\node[box, right=of retrieve] (generate) {Gemini\\generation};
+\node[decision, right=of generate] (grade) {Grounded\\useful?};
+\node[terminal, right=of grade] (answer) {Final\\answer};
+
+\draw[arr] (user) -- (ui);
+\draw[arr] (ui) -- (agent);
+\draw[arr] (agent) -- (loadmem);
+\draw[arr] (loadmem) -- (router);
+
+\draw[arr] (router) -- node[above,font=\scriptsize]{preference} (pref);
+\draw[arr] (router) -- node[above,font=\scriptsize]{memory} (memquery);
+\draw[arr] (router) -- node[above,font=\scriptsize]{recommend} (recquery);
+\draw[arr] (router) -- node[below,font=\scriptsize]{RAG} (rewrite);
+\draw[arr] (router) -- node[below,font=\scriptsize]{other} (smalltalk);
+
+\draw[arr] (pref.east) -| (answer.north);
+\draw[arr] (memquery.east) -| (answer.north);
+\draw[arr] (smalltalk.east) -| (answer.south);
+\draw[arr] (recquery) -- (chroma);
+\draw[arr] (chroma) -- (retrieve);
+\draw[arr] (rewrite) -- (retrieve);
+\draw[arr] (retrieve) -- (generate);
+\draw[arr] (generate) -- (grade);
+\draw[arr] (grade) -- node[above,font=\scriptsize]{yes} (answer);
+\draw[arr] (grade.south) -- ++(0,-0.65) -| node[pos=0.25,below,font=\scriptsize]{retry} (rewrite.south);
+\end{tikzpicture}
+}
+\caption{System architecture của VietCulture Assistant. Kiến trúc tách rõ các nhánh memory, recommendation và RAG để tránh xử lý mọi tin nhắn như một câu hỏi truy hồi.}
+\label{fig:pipeline}
+\end{figure*}
+
+So với pipeline RAG tuyến tính, kiến trúc này có thêm một tầng quyết định trước retrieval. Tầng này đóng vai trò như bộ điều phối hành vi: nó không trả lời thay generator, nhưng quyết định generator có cần được gọi hay không. Điều này đặc biệt quan trọng trong các hệ thống cá nhân hóa, vì một câu nói sở thích và một câu hỏi về cùng chủ đề có thể chứa từ khóa giống nhau nhưng cần hành động khác nhau.
+
+\subsection{Luồng xử lý theo intent}
+
+Sau khi routing, hệ thống không chỉ thay đổi prompt mà thay đổi cả luồng xử lý trong đồ thị. Node \textit{route\_intent\_node} đóng vai trò như một ``người gác cổng'' của LangGraph. Node này lấy tin nhắn cuối cùng trong \texttt{state["messages"]}, đưa vào hàm \textit{classify\_intent\_hybrid}, rồi trả về các biến điều phối gồm \textit{intent}, \textit{route\_reason}, \textit{intent\_confidence}, \textit{route\_source} và \textit{memory\_update\_allowed}. Trong đó, \textit{route\_source} cho biết quyết định đến từ rule router, LLM router hay rule fallback; còn \textit{memory\_update\_allowed} xác định node sau có được phép ghi long-term memory hay không.
+
+Cơ chế hybrid ưu tiên rule-based router vì tốc độ nhanh, kết quả ổn định và dễ giải thích. Nếu rule router trả confidence thấp và cấu hình \texttt{USE\_LLM\_INTENT\_ROUTER} được bật, hệ thống mới gọi LLM fallback để phân loại lại intent. Quyết định cuối cùng được đưa vào hàm \textit{route\_after\_intent}; hàm này chia đồ thị thành hai nhánh chính: \textit{needs\_rag} cho \textit{rag\_question}/\textit{followup\_question}, và \textit{no\_rag\_needed} cho các intent còn lại.
+
+\paragraph{Luồng \textit{needs\_rag}.}
+Khi câu hỏi yêu cầu truy xuất tri thức, hệ thống không gọi generator ngay mà đi qua hai bước chuẩn bị. Trước hết, node \textit{transform\_query} dùng LLM để viết lại câu hỏi gốc thành một truy vấn ngắn gọn hơn cho vector database. Bước này hữu ích khi người dùng hỏi tiếp bằng đại từ hoặc khi câu hỏi tự nhiên chứa nhiều thành phần không cần thiết cho retrieval. Sau đó, node \textit{rag\_node} dùng truy vấn đã tối ưu để gọi retriever, lấy các documents từ ChromaDB và đưa chúng vào \textit{GraphState}.
+
+\paragraph{Luồng \textit{no\_rag\_needed}.}
+Các intent không cần RAG được xử lý trong node \textit{non\_rag\_intent}. Với \textit{preference\_update}, hệ thống kiểm tra cờ \textit{memory\_update\_allowed}; nếu câu nói chưa đủ rõ, agent từ chối lưu và gợi ý cách diễn đạt như ``Tôi thích lễ hội''. Nếu hợp lệ, hệ thống trích xuất sở thích, gộp vào memory JSON và trả lời xác nhận. Với \textit{memory\_query}, hệ thống đọc memory hiện tại và tạo summary. Với \textit{recommendation\_request}, hệ thống tạo truy vấn từ memory, retrieve top chunks liên quan và format thành gợi ý có căn cứ. Với \textit{out\_of\_scope} hoặc \textit{chitchat}, hệ thống trả lời bằng template ngắn mà không gọi ChromaDB hay cập nhật memory.
+
+\subsection{Chunking và indexing}
+
+Quá trình xây dựng vector database được thực hiện trên Kaggle do máy local không có GPU. Trong phiên bản index legacy, notebook đọc 28,484 mẫu, nhóm dữ liệu theo cặp \textit{category}--\textit{normalized keyword}, lấy tối đa 5 mẫu cho mỗi keyword và chọn tối đa 3 QA tốt nhất theo độ khó và loại câu hỏi. Cách lấy mẫu này tạo 2,525 mẫu cân bằng và 6,404 QA chunks.
+
+Mỗi chunk chứa topic, normalized topic, category, câu trả lời, giải thích chi tiết và representative question. Metadata lưu \textit{image\_id}, \textit{category}, \textit{keyword}, \textit{normalized\_keyword}, \textit{question\_type} và \textit{difficulty}. Các chunks được nhúng bằng E5 trên GPU và lưu vào ChromaDB. Đây là index hiện project sử dụng ở chế độ \textit{legacy}.
+
+Sau giai đoạn thực nghiệm, project được refactor thành pipeline ingestion rõ hơn. Phiên bản refactor bổ sung canonical topic, aliases, nội dung chunk có cấu trúc hơn và metadata \textit{image\_path}. Tuy nhiên, để bảo toàn index đã build trên Kaggle, runtime hiện vẫn tương thích với index legacy.
+
+Về mặt thiết kế dữ liệu, QA pair được chọn làm đơn vị truy hồi chính thay vì toàn bộ sample ảnh. Lý do là mỗi ảnh có nhiều câu hỏi với các mức nhận thức khác nhau như identification, description, cultural, analysis và comparison. Nếu gộp tất cả vào một document quá dài, retriever có thể khó phân biệt người dùng đang hỏi định nghĩa, ý nghĩa văn hóa hay so sánh. Chia theo QA pair giúp mỗi chunk có mục tiêu ngữ nghĩa rõ hơn, đồng thời metadata \textit{question\_type} có thể được dùng trong reranking.
+
+\subsection{Retrieval và reranking}
+
+Retriever \textit{QaRetriever} hoạt động theo hai tầng. Tầng đầu tiên là vector search: truy vấn được nhúng bằng E5 với prefix \textit{query:}, sau đó ChromaDB trả về một tập ứng viên theo vector distance. Tầng thứ hai là lexical reranking: hệ thống dùng hàm \textit{score\_lexical\_match} để chấm lại từng ứng viên dựa trên token overlap, phrase match, topic metadata, entity coverage và question type. Cụ thể, nếu câu hỏi mang tính so sánh, document có \textit{question\_type=comparison} hoặc bao phủ đủ các thực thể trong câu hỏi sẽ được tăng điểm. Nếu câu hỏi hỏi nguồn gốc, các document chứa dấu hiệu như nguồn gốc, lịch sử hoặc truyền thuyết sẽ được ưu tiên.
+
+Final score được tính:
+\begin{equation}
+s_{\text{final}} = s_{\text{vector}} - \lambda s_{\text{lexical}} + p_{\text{missing}},
+\end{equation}
+trong đó \(s_{\text{vector}}\) là distance của Chroma, \(s_{\text{lexical}}\) là điểm khớp lexical, \(\lambda=0.06\), và \(p_{\text{missing}}\) là penalty nhỏ khi truy vấn có token quan trọng nhưng tài liệu không khớp lexical. Vì distance của Chroma càng thấp càng tốt, lexical match tốt sẽ làm giảm final score. Các documents có final score tốt nhất được đưa về GraphState dưới dạng LangChain \textit{Document}.
+
+\subsection{Intent routing}
+
+Hệ thống hỗ trợ bảy intent như Bảng~\ref{tab:intents}. Router mặc định là rule-based để giảm chi phí và dễ debug. Ngoài ra, project có LLM fallback router cho các câu mơ hồ; fallback chỉ được bật khi cấu hình \texttt{USE\_LLM\_INTENT\_ROUTER=true} và confidence của rule router dưới ngưỡng.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Intent} & \textbf{Ý nghĩa} \\
+\midrule
+\textit{rag\_question} & Câu hỏi tri thức cần RAG \\
+\textit{followup\_question} & Câu hỏi phụ thuộc ngữ cảnh \\
+\textit{recommendation\_request} & Yêu cầu gợi ý chủ đề \\
+\textit{preference\_update} & Người dùng nói sở thích \\
+\textit{memory\_query} & Hỏi hệ thống đang nhớ gì \\
+\textit{chitchat} & Xã giao ngắn \\
+\textit{out\_of\_scope} & Ngoài phạm vi dataset \\
+\bottomrule
+\end{tabular}
+\caption{Các intent được sử dụng trong hệ thống.}
+\label{tab:intents}
+\end{table}
+
+Mỗi quyết định routing gồm nhãn intent, lý do, confidence, nguồn quyết định và cờ \textit{memory\_update\_allowed}. Cờ này là một ràng buộc an toàn: chỉ intent \textit{preference\_update} mới được cập nhật long-term memory.
+
+Bảng~\ref{tab:route-examples} minh họa một số tình huống routing. Các ví dụ cho thấy cùng một miền chủ đề có thể dẫn đến hành động khác nhau. ``Tôi thích kiến trúc'' cập nhật memory, trong khi ``kiến trúc chùa Một Cột có ý nghĩa gì'' phải đi qua RAG.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{p{0.45\linewidth}p{0.42\linewidth}}
+\toprule
+\textbf{Tin nhắn} & \textbf{Intent kỳ vọng} \\
+\midrule
+Tôi thích kiến trúc & \textit{preference\_update} \\
+Tôi thích gì? & \textit{memory\_query} \\
+Gợi ý chủ đề văn hóa & \textit{recommendation\_request} \\
+Ý nghĩa văn hóa của bánh chưng là gì? & \textit{rag\_question} \\
+Chào bạn & \textit{chitchat} \\
+\bottomrule
+\end{tabular}
+\caption{Ví dụ routing cho các dạng tương tác phổ biến.}
+\label{tab:route-examples}
+\end{table}
+
+\subsection{Memory và recommendation}
+
+Memory được lưu theo \textit{user\_id}, gồm các trường \textit{categories}, \textit{topics}, \textit{keywords}, \textit{normalized\_keywords}, \textit{question\_styles}, \textit{evidence} và \textit{last\_updated}. Khi người dùng nói ``tôi thích kiến trúc'', hệ thống trích xuất category/topic, lưu câu gốc làm evidence và cập nhật timestamp. Khi người dùng hỏi ``tôi thích gì'', hệ thống đọc memory và tóm tắt lại.
+
+Với recommendation, memory không trực tiếp tạo nội dung gợi ý. Thay vào đó, memory được dùng để tạo truy vấn retrieve, ví dụ kết hợp các topic và category người dùng thích. Retriever lấy các chunks phù hợp, sau đó hệ thống tạo danh sách gợi ý gồm chủ đề, phân loại, lý do phù hợp và câu hỏi nên thử. Nhờ vậy, recommendation vừa cá nhân hóa, vừa dựa trên dữ liệu.
+
+\subsection{LLM generation}
+
+Node \textit{generate} chịu trách nhiệm tổng hợp câu trả lời tự nhiên cho người dùng. Đầu vào của node gồm câu hỏi gốc, danh sách retrieved documents và user preferences đã nạp từ memory. Trước khi gọi LLM, hệ thống dùng hàm \textit{build\_context} để ghép các documents thành một context block có kèm metadata quan trọng như category, keyword, question type và image id. Context này được đưa vào prompt cùng câu hỏi gốc.
+
+Prompt generation có ba ràng buộc chính. Thứ nhất, câu trả lời phải bằng tiếng Việt. Thứ hai, câu trả lời chỉ được dựa trên documents được cung cấp; nếu documents không đủ, mô hình phải nói không đủ thông tin. Thứ ba, user preferences chỉ được dùng để điều chỉnh trọng tâm hoặc văn phong, không được xem như bằng chứng thực tế. Ràng buộc thứ ba đặc biệt quan trọng trong hệ thống cá nhân hóa: việc người dùng thích kiến trúc không chứng minh bất kỳ sự kiện văn hóa nào về kiến trúc.
+
+Phân hệ generation sử dụng Gemini 2.5 Flash với \textit{temperature}=0.2. Mức temperature thấp giúp câu trả lời ổn định và hạn chế sáng tạo ngoài dữ liệu, nhưng vẫn đủ linh hoạt để nối các mảnh thông tin từ nhiều documents thành một đoạn văn tự nhiên. Nếu API gặp ngoại lệ, node bắt lỗi và trả về thông báo lỗi có kiểm soát để giao diện không bị gián đoạn.
+
+\subsection{Hallucination checker}
+
+Sau generation, hệ thống dùng một LLM grader độc lập để kiểm tra groundedness. Hàm \textit{check\_hallucination} nhận hai đầu vào: context documents và answer vừa sinh. Thay vì yêu cầu LLM trả lời tự do, hệ thống dùng structured output với schema \textit{GradeHallucinations}, gồm \textit{binary\_score} và \textit{reasoning}. \textit{binary\_score} là kết luận True/False cho câu hỏi answer có được documents hỗ trợ hay không; \textit{reasoning} là giải thích ngắn bằng tiếng Việt, giúp debug khi câu trả lời bị đánh rớt.
+
+Model dùng cho hallucination checker là một instance Gemini 2.5 Flash khác với \textit{temperature}=0. Mức temperature này làm quá trình chấm ổn định hơn so với generation. Nói cách khác, generator được phép có một mức linh hoạt nhỏ khi diễn đạt, còn grader được cấu hình bảo thủ hơn để đưa ra quyết định logic nhất quán.
+
+\subsection{Answer grader và query rewriter}
+
+Hallucination checker chỉ trả lời câu hỏi ``answer có bám vào tài liệu không''. Tuy nhiên, một câu trả lời có thể bám tài liệu nhưng vẫn chưa giải quyết đúng câu hỏi gốc. Vì vậy hệ thống có thêm hàm \textit{evaluate\_answer} với schema \textit{GradeAnswer}, gồm \textit{is\_relevant} và \textit{reasoning}. Hàm này so sánh original question, transformed question và final answer để quyết định câu trả lời có trực tiếp giải quyết nhu cầu người dùng hay không.
+
+Hai grader được kết hợp trong hàm \textit{check\_hallucination\_and\_evaluate}. Nếu phát hiện answer không grounded, đồ thị trả nhãn \textit{is\_hallucinated} và quay lại node \textit{generate} để sinh lại từ cùng context. Nếu answer grounded nhưng chưa hữu ích, đồ thị trả nhãn \textit{is\_not\_useful} và quay lại \textit{transform\_query} để viết lại truy vấn, retrieve context khác và thử lại. Nếu answer đạt cả hai tiêu chí, đồ thị trả \textit{is\_useful} và đi tiếp đến node kết thúc RAG path. Biến \textit{retry\_count} giới hạn số vòng lặp; khi đạt \textit{max\_retries}, hệ thống dừng để tránh retry vô hạn.
+
+\subsection{Điều phối bằng LangGraph}
+
+LangGraph được dùng để biểu diễn pipeline như một state graph. State chứa lịch sử tin nhắn, intent, lý do routing, confidence, nguồn routing, cờ cho phép cập nhật memory, câu hỏi đã rewrite, tài liệu retrieve, câu trả lời, user id, memory dạng JSON và số lần retry. Thiết kế state này giúp UI debug được từng bước xử lý mà không cần can thiệp vào logic bên trong.
+
+Graph gồm bảy node chính: \textit{load\_memory}, \textit{route\_intent}, \textit{non\_rag\_intent}, \textit{transform}, \textit{rag}, \textit{generate} và \textit{update\_memory}. Conditional edges quyết định nhánh đi tiếp dựa trên intent và kết quả grader. Nhờ đó, cùng một hàm public \textit{invoke\_agent} có thể xử lý nhiều kiểu tương tác khác nhau.
+
+\section{Triển khai hệ thống}
+
+Hệ thống được triển khai bằng Python với LangChain~\citep{langchain}, LangGraph, ChromaDB, Gemini và Streamlit. Các module chính gồm: \texttt{src/ingestion} cho chunking/indexing, \texttt{src/retrieval} cho truy hồi và reranking, \texttt{src/routing} cho intent router, \texttt{src/memory} cho long-term memory, \texttt{src/recommendation} cho gợi ý và \texttt{src/agent} cho graph orchestration.
+
+Việc tách \textit{User ID} và \textit{Conversation} có hai mục đích. \textit{User ID} là khóa của long-term memory, còn \textit{Conversation} là khóa của short-term thread trong LangGraph. Nhờ vậy, một người dùng có thể có nhiều cuộc trò chuyện nhưng vẫn dùng chung hồ sơ sở thích dài hạn. Đồng thời, hai người dùng khác nhau không bị trộn memory.
+
+\subsection{Giao diện Streamlit}
+
+Giao diện Streamlit được thiết kế để phục vụ hai mục tiêu: demo trải nghiệm người dùng và hỗ trợ debug pipeline. Hệ thống có hai màn hình chính. Màn hình chào giới thiệu VietCulture, hiển thị preview hội thoại và các topic cards như ẩm thực, lễ hội, trang phục, kiến trúc, nhạc cụ, làng nghề và thể thao. Các card này dùng ảnh từ Hugging Face để tạo tín hiệu trực quan về miền văn hóa mà hệ thống hỗ trợ.
+
+Màn hình chat gồm sidebar và vùng hội thoại chính. Sidebar cho phép nhập \textit{User ID} và \textit{Conversation}, hiển thị thread id, trạng thái Gemini, loại router đang dùng, đường dẫn ChromaDB và memory đã lưu. Vùng hội thoại chính hiển thị câu hỏi, câu trả lời, avatar assistant và debug state sau mỗi lượt. Debug state gồm intent, nguồn routing, confidence, lý do route, số lượng documents retrieve được và memory JSON hiện tại. Nhờ đó, khi demo nhóm có thể giải thích vì sao hệ thống chọn một nhánh xử lý cụ thể.
+
+\begin{figure*}[t]
+\centering
+\optionalfigure{figures/streamlit_welcome.png}{0.92\textwidth}{Gợi ý: chụp màn welcome screen của Streamlit.}
+\caption{Minh họa giao diện welcome screen. Hình này nên thể hiện topic cards và preview hội thoại để người đọc hiểu trải nghiệm khởi đầu của hệ thống.}
+\label{fig:welcome-ui}
+\end{figure*}
+
+Khi intent là \textit{recommendation\_request}, UI không chỉ hiển thị câu trả lời dạng text mà còn render các recommendation cards. Mỗi card chứa ảnh, topic, category và question type của document được retrieve. Ảnh không được lưu trong repo mà được dựng thành URL trực tiếp từ Hugging Face. Với index legacy, metadata chưa luôn có \textit{image\_path}, vì vậy UI có thêm cơ chế suy luận đường dẫn ảnh từ \textit{category}, \textit{keyword}, \textit{image\_id}; nếu có file JSON dataset local, UI đọc nhanh các dòng \textit{image\_path} để xác định đúng extension \texttt{.jpg} hoặc \texttt{.png}.
+
+\begin{figure*}[t]
+\centering
+\optionalfigure{figures/streamlit_chat_recommendation.png}{0.92\textwidth}{Gợi ý: chụp màn chat sau prompt ``gợi ý chủ đề văn hóa''.}
+\caption{Minh họa màn hình chat và recommendation cards. Hình này nên thể hiện memory sidebar, câu trả lời gợi ý và các ảnh tương ứng từ Hugging Face.}
+\label{fig:chat-ui}
+\end{figure*}
+
+\subsection{Module hóa code}
+
+Về mặt triển khai, project được refactor để mỗi nhóm chức năng nằm trong một module riêng. \texttt{src/routing} chỉ chịu trách nhiệm phân loại intent; \texttt{src/memory} chỉ quản lý long-term memory; \texttt{src/recommendation} tạo truy vấn và format gợi ý; \texttt{src/retrieval} xử lý Chroma và reranking; \texttt{src/agent} nối các thành phần thành LangGraph. Cách module hóa này giúp báo cáo và code có cùng cấu trúc khái niệm: người đọc có thể đi từ kiến trúc trong Hình~\ref{fig:pipeline} đến từng module tương ứng trong repo.
+
+\section{Thực nghiệm}
+
+\subsection{Thiết lập}
+
+Chúng tôi đánh giá baseline bằng script \texttt{src/evaluation/baseline\_eval.py}. Script này không gọi Gemini, mà tập trung kiểm tra hai thành phần có thể đánh giá nhanh và lặp lại: intent routing và retrieval. Cấu hình runtime dùng ChromaDB local ở \texttt{chroma\_db}, collection \texttt{langchain}, model embedding \textit{intfloat/multilingual-e5-base}, \textit{top-k}=5 và \textit{fetch-k}=40.
+
+\subsection{Kết quả}
+
+Bảng~\ref{tab:eval} trình bày kết quả baseline. Bộ test intent gồm năm nhóm: cập nhật sở thích, hỏi memory, yêu cầu gợi ý, câu hỏi RAG và chitchat. Bộ test retrieval gồm bốn truy vấn về bánh tét, so sánh bánh chưng--bánh tét, xe máy và thảm cói.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Thành phần} & \textbf{Đúng} & \textbf{Tổng} \\
+\midrule
+Intent routing & 5 & 5 \\
+Retrieval & 4 & 4 \\
+\midrule
+Tổng & 9 & 9 \\
+\bottomrule
+\end{tabular}
+\caption{Kết quả kiểm thử baseline.}
+\label{tab:eval}
+\end{table}
+
+Kết quả cho thấy các rule intent hiện đủ tốt cho các tình huống demo cốt lõi, còn retriever tìm được chunks đúng chủ đề trên các truy vấn kiểm thử nhỏ. Tuy nhiên, đây chưa phải đánh giá toàn diện. Các thước đo như groundedness, độ tự nhiên của câu trả lời, chất lượng cá nhân hóa và trải nghiệm người dùng cần một bộ test lớn hơn hoặc đánh giá thủ công có kiểm soát.
+
+\subsection{Phân tích định tính}
+
+Trong thử nghiệm tương tác, khi người dùng nhập ``tôi thích thể thao'' và ``tôi thích kiến trúc'', hệ thống lưu hai sở thích vào memory. Sau đó, với yêu cầu ``gợi ý chủ đề văn hóa'', hệ thống retrieve các chunks liên quan đến thể thao truyền thống và kiến trúc, rồi tạo danh sách gợi ý như vật cổ truyền Việt Nam hoặc nhà truyền thống miền Tây. Điều này cho thấy recommendation không chỉ lặp lại sở thích đã lưu, mà sử dụng sở thích để tìm tài liệu cụ thể trong dataset.
+
+Một ví dụ khác là câu ``ý nghĩa văn hóa của bóng chuyền bãi biển''. Đây là câu hỏi tri thức, nên router không cập nhật memory mà chuyển sang RAG. Thiết kế này tránh lỗi phổ biến của các hệ thống memory đơn giản: nhầm lẫn giữa ``người dùng hỏi về X'' và ``người dùng thích X''.
+
+\section{Thảo luận}
+
+Điểm mạnh chính của thiết kế là tách rõ ``hỏi đáp tri thức'' và ``quản lý tương tác''. Việc này làm pipeline dễ giải thích: câu chào không cần retrieval, câu sở thích chỉ cập nhật memory, còn câu hỏi văn hóa mới đi qua RAG. Thiết kế này cũng giảm nguy cơ lưu sai sở thích người dùng.
+
+Một vấn đề phát sinh từ thực nghiệm là index legacy chưa lưu đủ \textit{image\_path}. Điều này không ảnh hưởng trực tiếp đến RAG text, nhưng ảnh hưởng đến UI recommendation có ảnh. Project đã thêm lớp suy luận URL ảnh từ metadata và dataset JSON; về lâu dài, cách tốt hơn là rebuild index bằng pipeline refactor để metadata đầy đủ ngay trong Chroma.
+
+Một điểm đánh đổi khác nằm ở router. Rule-based router nhanh, rẻ và ổn định với các pattern rõ ràng, nhưng có thể bỏ sót các câu tự nhiên phức tạp. LLM fallback router giải quyết một phần vấn đề này, nhưng làm tăng chi phí và phụ thuộc API. Vì vậy project đặt rule router làm mặc định, còn LLM fallback là tùy chọn có cấu hình.
+
+\section{Hạn chế và hướng phát triển}
+
+Hệ thống hiện có một số hạn chế. Thứ nhất, memory lưu bằng JSON nên phù hợp demo nhưng chưa tối ưu cho nhiều người dùng đồng thời. Thứ hai, evaluation còn nhỏ và chưa đo trực tiếp chất lượng sinh câu trả lời. Thứ ba, một số keyword trong dataset/index còn không dấu hoặc lẫn tiếng Anh, làm nội dung recommendation chưa thật tự nhiên. Cuối cùng, hệ thống chưa triển khai đầy đủ các thành phần production như xác thực, logging, rate limit và persistent database.
+
+Hướng phát triển tiếp theo gồm rebuild Chroma index bằng pipeline refactor, chuyển memory sang SQLite hoặc PostgreSQL, mở rộng bộ đánh giá, bật LLM router cho các câu intent mơ hồ, và bổ sung multimodal flow cho phép người dùng chọn ảnh từ dataset rồi hỏi đáp theo ảnh.
+
+\section{Kết luận}
+
+Bài báo trình bày VietCulture Assistant, một hệ thống hỏi đáp và gợi ý một số chủ đề văn hóa Việt Nam theo hướng cá nhân hóa. Hệ thống kết hợp RAG, vector retrieval, intent routing, long-term memory, recommendation có căn cứ và giao diện Streamlit. Kết quả baseline cho thấy pipeline hiện hoạt động ổn trên các ca kiểm thử nhỏ, đồng thời chỉ ra rằng routing trước RAG là một thiết kế hữu ích cho chatbot cá nhân hóa: nó giúp tiết kiệm tài nguyên, giảm xử lý sai intent và làm rõ ranh giới giữa tri thức từ dataset và sở thích người dùng.
+
+\bibliographystyle{acl_natbib}
+\bibliography{references}
+
+\end{document}

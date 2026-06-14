@@ -42,17 +42,52 @@ def build_recommendation_query(memory: dict[str, Any]) -> str:
 
     memory = load_memory_json(memory)
     topics = memory.get("topics", []) or memory.get("keywords", [])
-    normalized_keywords = memory.get("normalized_keywords", [])
     category_labels = [
         DATASET_CATEGORY_LABELS.get(category, category)
         for category in memory.get("categories", [])
     ]
 
-    focus_terms = unique_values(topics + normalized_keywords + category_labels)
+    focus_terms = unique_values_by_normalized(topics + category_labels)
     if not focus_terms:
         return ""
 
     return "gợi ý chủ đề văn hóa Việt Nam " + " ".join(focus_terms)
+
+
+def build_recommendation_queries(memory: dict[str, Any]) -> list[str]:
+    """
+    Tạo nhiều query nhỏ để recommendation đa dạng theo từng sở thích.
+
+    Biến đầu vào:
+    - memory: dict sở thích hiện tại của user.
+
+    Ví dụ output:
+    ["gợi ý chủ đề văn hóa Việt Nam thể thao",
+     "gợi ý chủ đề văn hóa Việt Nam kiến trúc"]
+
+    Cách tự viết lại:
+    Thay vì nhồi mọi sở thích vào một query dài, tách từng topic/category thành
+    query riêng. Retrieval sẽ lấy ứng viên đa dạng hơn trước khi formatter chọn.
+    """
+
+    memory = load_memory_json(memory)
+    topics = memory.get("topics", []) or memory.get("keywords", [])
+    category_labels = [
+        DATASET_CATEGORY_LABELS.get(category, category)
+        for category in memory.get("categories", [])
+    ]
+    focus_terms = unique_values_by_normalized(topics + category_labels)
+    if not focus_terms:
+        return []
+
+    queries = [
+        "gợi ý chủ đề văn hóa Việt Nam " + focus_term
+        for focus_term in focus_terms
+    ]
+    combined_query = build_recommendation_query(memory)
+    if combined_query:
+        queries.append(combined_query)
+    return unique_values_by_normalized(queries)
 
 
 def build_recommendation_message(memory: dict[str, Any]) -> str:
@@ -97,14 +132,16 @@ def build_grounded_recommendation_message(
     - retrieved_chunks: kết quả từ QaRetriever, mỗi chunk có document + metadata.
 
     Ví dụ output:
+    Mình chọn 3 hướng khá hợp với bạn:
+
     1. Bánh tét
-       - Phân loại: nhóm ẩm thực; dạng câu hỏi cultural
-       - Vì sao hợp: khớp với sở thích ẩm thực đã lưu trong memory.
-       - Câu hỏi nên thử: Ý nghĩa văn hóa của bánh tét là gì?
+       Vì bạn đang quan tâm đến ẩm thực, chủ đề này giúp đi từ món ăn quen
+       thuộc sang ý nghĩa đoàn tụ trong ngày Tết.
+       Bạn có thể hỏi tiếp: Ý nghĩa văn hóa của bánh tét là gì?
 
     Cách tự viết lại:
     Duyệt top chunks, lấy topic/category/question từ metadata, bỏ trùng topic,
-    tạo lý do vì sao hợp với memory, rồi giới hạn khoảng 3 gợi ý.
+    tạo lý do tự nhiên, rồi giới hạn khoảng 3 gợi ý để người dùng dễ chọn.
     """
 
     memory = load_memory_json(memory)
@@ -122,7 +159,7 @@ def build_grounded_recommendation_message(
     recommendations: list[str] = []
     seen_topics: set[str] = set()
 
-    for chunk in retrieved_chunks:
+    for chunk in rank_recommendation_candidates(memory, retrieved_chunks):
         document = getattr(chunk, "document", chunk)
         metadata = getattr(document, "metadata", {}) or {}
         content = getattr(document, "page_content", "")
@@ -149,6 +186,11 @@ def build_grounded_recommendation_message(
         question = str(metadata.get("question", "")).strip()
         if not question:
             question = extract_content_section(content, ["Question:"])
+        question = build_suggested_question(
+            topic=display_topic,
+            raw_question=question,
+            question_type=question_type,
+        )
 
         short_answer = extract_content_section(content, ["Answer:"])
         reason = extract_recommendation_reason(content)
@@ -159,22 +201,22 @@ def build_grounded_recommendation_message(
             content=content,
         )
 
+        category_phrase = build_category_phrase(category)
         recommendation_lines = [f"{len(recommendations) + 1}. {display_topic}"]
-        detail_parts = []
-        if category:
-            detail_parts.append(f"nhóm {category}")
-        if question_type:
-            detail_parts.append(f"dạng câu hỏi {question_type}")
-        if detail_parts:
-            recommendation_lines.append("   - Phân loại: " + "; ".join(detail_parts))
         if fit_reason:
-            recommendation_lines.append("   - Vì sao hợp: " + fit_reason)
+            recommendation_lines.append(
+                "   " + build_recommendation_intro_sentence(
+                    topic=display_topic,
+                    category_phrase=category_phrase,
+                    fit_reason=fit_reason,
+                )
+            )
         if question:
-            recommendation_lines.append("   - Câu hỏi nên thử: " + question)
+            recommendation_lines.append("   Bạn có thể hỏi tiếp: " + question)
         if short_answer:
-            recommendation_lines.append("   - Trả lời ngắn: " + compact_text(short_answer, max_chars=180))
+            recommendation_lines.append("   Điểm thú vị: " + compact_text(short_answer, max_chars=170))
         elif reason:
-            recommendation_lines.append("   - Gợi ý nội dung: " + compact_text(reason, max_chars=180))
+            recommendation_lines.append("   Điểm thú vị: " + compact_text(reason, max_chars=170))
 
         recommendations.append("\n".join(recommendation_lines))
 
@@ -185,11 +227,187 @@ def build_grounded_recommendation_message(
         return build_recommendation_message(memory)
 
     return (
-        "Dựa trên sở thích đã lưu"
+        "Mình chọn 3 hướng khá hợp với sở thích đã lưu"
         + user_interest_summary
-        + " và các tài liệu tìm được trong dataset, mình gợi ý bạn bắt đầu với:\n\n"
+        + ". Bạn có thể bắt đầu từ một trong các chủ đề này:\n\n"
         + "\n\n".join(recommendations)
     )
+
+
+def build_category_phrase(category: str) -> str:
+    """
+    Chuyển category thành cụm diễn đạt tự nhiên trong câu recommendation.
+
+    Biến đầu vào:
+    - category: nhãn category đã chuyển sang tiếng Việt, ví dụ "ẩm thực".
+
+    Ví dụ output:
+    build_category_phrase("ẩm thực") -> "mảng ẩm thực"
+
+    Cách tự viết lại:
+    Nếu có category thì thêm tiền tố "mảng"; nếu rỗng thì dùng cụm trung tính.
+    """
+
+    clean_category = str(category or "").strip()
+    if not clean_category:
+        return "một mảng văn hóa trong dataset"
+    return "mảng " + clean_category
+
+
+def build_recommendation_intro_sentence(
+    topic: str,
+    category_phrase: str,
+    fit_reason: str,
+) -> str:
+    """
+    Tạo một câu giải thích ngắn thay cho dòng metadata khô cứng.
+
+    Biến đầu vào:
+    - topic: tên chủ đề đang gợi ý.
+    - category_phrase: cụm category tự nhiên, ví dụ "mảng kiến trúc".
+    - fit_reason: lý do match với memory đã build ở bước trước.
+
+    Ví dụ output:
+    "Chủ đề này nằm trong mảng ẩm thực và khớp với sở thích Tết đã lưu..."
+
+    Cách tự viết lại:
+    Ghép category + fit_reason thành một câu hoàn chỉnh. Không nhắc tới score,
+    vector, question_type hay metadata để người dùng không thấy cảm giác debug.
+    """
+
+    clean_topic = str(topic or "chủ đề này").strip()
+    clean_fit_reason = str(fit_reason or "").strip()
+    if clean_fit_reason:
+        return (
+            f"{clean_topic} nằm trong {category_phrase}; "
+            + clean_fit_reason[:1].lower()
+            + clean_fit_reason[1:]
+        )
+    return f"{clean_topic} nằm trong {category_phrase}, phù hợp để bạn mở rộng cuộc trò chuyện."
+
+
+def unique_values_by_normalized(values: list[str]) -> list[str]:
+    """
+    Deduplicate theo normalize_text để tránh lặp có dấu/không dấu.
+
+    Ví dụ output:
+    ["thể thao", "the thao", "kiến trúc"] -> ["thể thao", "kiến trúc"]
+
+    Cách tự viết lại:
+    Dùng normalize_text(value) làm key, nhưng giữ lại display text gốc đầu tiên.
+    """
+
+    seen_normalized: set[str] = set()
+    clean_values: list[str] = []
+    for value in values:
+        display_value = str(value or "").strip()
+        normalized_value = normalize_text(display_value)
+        if not display_value or not normalized_value or normalized_value in seen_normalized:
+            continue
+        seen_normalized.add(normalized_value)
+        clean_values.append(display_value)
+    return clean_values
+
+
+def rank_recommendation_candidates(
+    memory: dict[str, Any],
+    retrieved_chunks: list[Any],
+) -> list[Any]:
+    """
+    Sắp xếp ứng viên recommendation để ưu tiên đa dạng category.
+
+    Biến đầu vào:
+    - memory: memory user, dùng lấy thứ tự category user quan tâm.
+    - retrieved_chunks: danh sách chunks đã retrieve từ nhiều query.
+
+    Ví dụ output:
+    Nếu memory có thể thao, kiến trúc, ẩm thực thì top candidates cố gắng có cả
+    ba nhóm thay vì toàn thể thao.
+
+    Cách tự viết lại:
+    Duyệt theo category trong memory trước, lấy chunk tốt nhất mỗi category,
+    sau đó mới fill phần còn thiếu bằng các chunk còn lại.
+    """
+
+    memory = load_memory_json(memory)
+    preferred_categories = list(memory.get("categories", []))
+    selected_chunks: list[Any] = []
+    selected_ids: set[str] = set()
+
+    def chunk_key(chunk: Any) -> str:
+        document = getattr(chunk, "document", chunk)
+        metadata = getattr(document, "metadata", {}) or {}
+        return "|".join(
+            [
+                str(metadata.get("category", "")),
+                normalize_text(metadata.get("keyword") or metadata.get("topic") or ""),
+                str(metadata.get("image_id", "")),
+                str(metadata.get("question_type", "")),
+            ]
+        )
+
+    def chunk_category(chunk: Any) -> str:
+        document = getattr(chunk, "document", chunk)
+        metadata = getattr(document, "metadata", {}) or {}
+        return str(metadata.get("category", ""))
+
+    for category in preferred_categories:
+        for chunk in retrieved_chunks:
+            key = chunk_key(chunk)
+            if key in selected_ids or chunk_category(chunk) != category:
+                continue
+            selected_chunks.append(chunk)
+            selected_ids.add(key)
+            break
+
+    for chunk in retrieved_chunks:
+        key = chunk_key(chunk)
+        if key in selected_ids:
+            continue
+        selected_chunks.append(chunk)
+        selected_ids.add(key)
+
+    return selected_chunks
+
+
+def build_suggested_question(
+    topic: str,
+    raw_question: str,
+    question_type: str,
+) -> str:
+    """
+    Làm câu hỏi gợi ý cụ thể hơn, tránh câu chung chung "hình ảnh này".
+
+    Ví dụ output:
+    topic="Bánh chưng", question_type="cultural"
+    -> "Ý nghĩa văn hóa của Bánh chưng là gì?"
+
+    Cách tự viết lại:
+    Nếu raw_question còn phụ thuộc ảnh/context, sinh câu hỏi template theo topic.
+    Nếu raw_question đã cụ thể thì giữ lại.
+    """
+
+    normalized_question = normalize_text(raw_question)
+    generic_markers = [
+        "hinh anh nay",
+        "hinh nay",
+        "vat nay",
+        "mon nay",
+        "day la",
+    ]
+    if raw_question and not any(marker in normalized_question for marker in generic_markers):
+        return raw_question
+
+    normalized_type = normalize_text(question_type)
+    if "comparison" in normalized_type:
+        return f"{topic} có điểm gì đáng chú ý so với các chủ đề văn hóa liên quan?"
+    if "analysis" in normalized_type:
+        return f"Vì sao {topic} đáng chú ý trong văn hóa Việt Nam?"
+    if "description" in normalized_type:
+        return f"{topic} có những đặc điểm nổi bật nào?"
+    if "identification" in normalized_type:
+        return f"{topic} là gì?"
+    return f"Ý nghĩa văn hóa của {topic} là gì?"
 
 
 def extract_recommendation_reason(page_content: str, max_chars: int = 180) -> str:
@@ -239,17 +457,48 @@ def build_user_interest_summary(memory: dict[str, Any]) -> str:
     ghép bằng dấu phẩy.
     """
 
+    topics = memory.get("topics", []) or memory.get("keywords", [])
     categories = [
         DATASET_CATEGORY_LABELS.get(category, category)
         for category in memory.get("categories", [])
     ]
-    topics = memory.get("topics", []) or memory.get("keywords", [])
-    focus_terms = unique_values(categories + topics)
+    focus_terms = remove_redundant_focus_terms(
+        unique_values_by_normalized(topics + categories)
+    )
 
     if not focus_terms:
         return ""
 
     return " về " + ", ".join(focus_terms)
+
+
+def remove_redundant_focus_terms(focus_terms: list[str]) -> list[str]:
+    """
+    Bỏ các cụm sở thích bị lặp nghĩa để câu mở đầu recommendation gọn hơn.
+
+    Biến đầu vào:
+    - focus_terms: danh sách sở thích đã deduplicate theo normalize_text.
+
+    Ví dụ output:
+    ["thể thao", "thể thao truyền thống", "kiến trúc"] -> ["thể thao", "kiến trúc"]
+
+    Cách tự viết lại:
+    So sánh dạng normalize của từng term. Nếu một term dài chứa term ngắn đã có,
+    giữ term ngắn vì nó đại diện rộng hơn và đọc tự nhiên hơn trong câu mở đầu.
+    """
+
+    cleaned_terms: list[str] = []
+    normalized_terms: list[str] = []
+    for term in focus_terms:
+        normalized_term = normalize_text(term)
+        if any(
+            existing and existing in normalized_term
+            for existing in normalized_terms
+        ):
+            continue
+        cleaned_terms.append(term)
+        normalized_terms.append(normalized_term)
+    return cleaned_terms
 
 
 def build_recommendation_fit_reason(
@@ -290,7 +539,7 @@ def build_recommendation_fit_reason(
         if normalize_text(category_label) == normalized_category:
             matched_terms.append(category_label)
 
-    matched_terms = unique_values(matched_terms)
+    matched_terms = remove_redundant_focus_terms(unique_values_by_normalized(matched_terms))
     if matched_terms:
         return "khớp với sở thích " + ", ".join(matched_terms) + " đã lưu trong memory."
 
@@ -360,8 +609,10 @@ def prettify_topic_for_display(topic: str) -> str:
         return "Chủ đề trong dataset"
 
     replacements = {
+        "vat co truyen": "vật cổ truyền",
         "le hoi": "lễ hội",
         "am thuc": "ẩm thực",
+        "banh bao": "bánh bao",
         "banh chung": "bánh chưng",
         "banh tet": "bánh tét",
         "xe may": "xe máy",
@@ -373,6 +624,13 @@ def prettify_topic_for_display(topic: str) -> str:
         "my nghe": "mỹ nghệ",
         "giao thong": "giao thông",
         "kien truc": "kiến trúc",
+        "nha truyen thong": "nhà truyền thống",
+        "mien tay": "miền Tây",
+        "co truyen": "cổ truyền",
+        "truyen thong": "truyền thống",
+        "cu ta": "cử tạ",
+        "the thao": "thể thao",
+        "viet nam": "Việt Nam",
     }
 
     normalized_display = normalize_text(display_topic)
@@ -382,7 +640,7 @@ def prettify_topic_for_display(topic: str) -> str:
     if normalized_display != normalize_text(display_topic):
         display_topic = normalized_display
 
-    if display_topic.islower():
+    if display_topic and display_topic[:1].islower():
         return display_topic[:1].upper() + display_topic[1:]
 
     return display_topic

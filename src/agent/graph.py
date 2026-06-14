@@ -43,6 +43,7 @@ from src.routing.routing import (
     build_memory_summary,
     build_preference_saved_message,
     build_recommendation_message,
+    build_recommendation_queries,
     build_recommendation_query,
     classify_intent_hybrid,
     dump_memory_json,
@@ -50,6 +51,7 @@ from src.routing.routing import (
     load_memory_json,
     load_user_memory,
     merge_memory,
+    rank_recommendation_candidates,
     save_user_memory,
 )
 
@@ -481,18 +483,40 @@ Answer:"""
             answer = build_memory_summary(current_memory)
             documents: list[Any] = []
         elif intent == "recommendation_request":
-            recommendation_query = build_recommendation_query(current_memory)
-            if recommendation_query:
-                retrieved_chunks = retriever.retrieve(
-                    query=recommendation_query,
-                    top_k=3,
-                    fetch_k=settings.fetch_k,
-                )
+            recommendation_queries = build_recommendation_queries(current_memory)
+            if recommendation_queries:
+                retrieved_chunks = []
+                seen_doc_keys: set[str] = set()
+                per_query_top_k = max(3, settings.top_k)
+                for recommendation_query in recommendation_queries:
+                    query_chunks = retriever.retrieve(
+                        query=recommendation_query,
+                        top_k=per_query_top_k,
+                        fetch_k=settings.fetch_k,
+                    )
+                    for chunk in query_chunks:
+                        metadata = getattr(chunk.document, "metadata", {}) or {}
+                        doc_key = "|".join(
+                            [
+                                str(metadata.get("category", "")),
+                                str(metadata.get("keyword", "")),
+                                str(metadata.get("image_id", "")),
+                                str(metadata.get("question_type", "")),
+                            ]
+                        )
+                        if doc_key in seen_doc_keys:
+                            continue
+                        seen_doc_keys.add(doc_key)
+                        retrieved_chunks.append(chunk)
                 answer = build_grounded_recommendation_message(
                     current_memory,
                     retrieved_chunks,
                 )
-                documents = [chunk.document for chunk in retrieved_chunks]
+                selected_chunks = rank_recommendation_candidates(
+                    current_memory,
+                    retrieved_chunks,
+                )[:3]
+                documents = [chunk.document for chunk in selected_chunks]
             else:
                 answer = build_recommendation_message(current_memory)
                 documents = []

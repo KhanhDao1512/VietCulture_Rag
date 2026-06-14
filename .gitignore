@@ -22,8 +22,9 @@ chroma_db/
 chroma_db_qa_hybrid/
 chroma_db_qa_test/
 
-# Large raw dataset. Keep a download link or Kaggle reference in the report.
+# Large raw dataset. Keep the Hugging Face link in README instead of Git.
 vietnamese_vqa_dataset.json
+data/vietnamese_vqa_dataset.json
 
 # Local memory state
 user_memories.json

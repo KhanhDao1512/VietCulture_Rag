@@ -1,4 +1,19 @@
-"""Configuration helpers for the memory-agent baseline."""
+"""
+Cấu hình runtime cho VietCulture memory agent.
+
+Mục đích file:
+Đọc `.env`, chọn Chroma index, cấu hình embedding/runtime, và ép cache
+HuggingFace nằm trong thư mục project để dễ quản lý khi demo.
+
+Luồng xử lý:
+load_agent_settings()
+-> load `.env`
+-> configure_huggingface_cache()
+-> chọn Chroma profile:
+   legacy: chroma_db / langchain
+   hybrid: chroma_db_qa_hybrid / qa_hybrid_chunks
+-> trả AgentSettings cho graph.py và retriever.py
+"""
 
 from __future__ import annotations
 
@@ -11,7 +26,28 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class AgentSettings:
-    """All runtime settings needed to build the agent graph."""
+    """
+    Toàn bộ config cần để build agent graph.
+
+    Biến quan trọng:
+    - project_root: thư mục gốc project.
+    - memory_file: file JSON lưu long-term memory.
+    - retriever_profile: `legacy` dùng chroma_db, `hybrid` dùng chroma_db_qa_hybrid.
+    - persist_dir: thư mục Chroma thực tế.
+    - collection_name: tên collection trong Chroma.
+    - embed_model/device: model embedding dùng lúc query runtime.
+    - top_k/fetch_k: số kết quả retrieval cuối/candidate ban đầu.
+    - google_api_key/gemini_model: cấu hình Gemini.
+    - use_llm_intent_router: bật/tắt LLM fallback cho intent mơ hồ.
+    - llm_intent_confidence_threshold: rule confidence dưới ngưỡng này mới gọi LLM.
+
+    Ví dụ output:
+    AgentSettings(retriever_profile="legacy", persist_dir=Path("D:/Ds107/chroma_db"))
+
+    Cách tự viết lại:
+    Gom toàn bộ biến môi trường vào một dataclass để các file khác không phải
+    tự đọc `.env` lặp lại.
+    """
 
     project_root: Path
     memory_file: Path
@@ -27,10 +63,21 @@ class AgentSettings:
     max_retries: int
     gemini_model: str
     google_api_key: str | None
+    use_llm_intent_router: bool
+    llm_intent_confidence_threshold: float
 
 
 def configure_huggingface_cache(project_root: Path) -> None:
-    """Keep Hugging Face model cache inside the project workspace."""
+    """
+    Đặt cache HuggingFace vào trong workspace.
+
+    Ví dụ output:
+    HF_HOME=D:/Ds107/.cache/huggingface
+
+    Cách tự viết lại:
+    Tạo thư mục cache, rồi set các biến môi trường HF_HOME,
+    HUGGINGFACE_HUB_CACHE, SENTENCE_TRANSFORMERS_HOME.
+    """
 
     cache_dir = project_root / ".cache" / "huggingface"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -43,7 +90,18 @@ def configure_huggingface_cache(project_root: Path) -> None:
 
 
 def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings:
-    """Load settings from `.env` and environment variables."""
+    """
+    Đọc toàn bộ settings từ `.env` và biến môi trường.
+
+    Ví dụ output hiện tại:
+    retriever_profile="legacy"
+    persist_dir="D:/Ds107/chroma_db"
+    collection_name="langchain"
+
+    Cách tự viết lại:
+    Load `.env`, chọn default index theo profile, cho phép env override, rồi
+    ép kiểu int/float cho các tham số retrieval.
+    """
 
     root = Path(project_root or Path.cwd()).resolve()
     load_dotenv(root / ".env")
@@ -67,6 +125,7 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
             collection_name = "qa_chunks"
 
     raw_max_score = os.getenv("QA_RETRIEVAL_MAX_SCORE", "").strip()
+    use_llm_intent_router = os.getenv("USE_LLM_INTENT_ROUTER", "false").strip().lower()
 
     return AgentSettings(
         project_root=root,
@@ -83,4 +142,8 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
         max_retries=int(os.getenv("QA_MAX_RETRIES", "3")),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         google_api_key=os.getenv("GOOGLE_API_KEY"),
+        use_llm_intent_router=use_llm_intent_router in {"1", "true", "yes", "on"},
+        llm_intent_confidence_threshold=float(
+            os.getenv("LLM_INTENT_CONFIDENCE_THRESHOLD", "0.75")
+        ),
     )

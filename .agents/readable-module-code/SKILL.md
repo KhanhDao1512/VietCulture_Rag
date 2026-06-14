@@ -64,6 +64,56 @@ Avoid:
 topic = resolve_topic_from_questions(sample)
 ```
 
+## VietCulture Project Comment Rules
+
+For this project, comments and docstrings should be written in Vietnamese. Function
+and variable names should stay in English Python style.
+
+Every new or heavily refactored file should start with a Vietnamese module
+docstring:
+
+```text
+Mục đích file:
+File này làm nhiệm vụ gì trong pipeline.
+
+Luồng xử lý:
+hàm A()
+-> hàm B()
+-> output cuối cùng
+
+Ghi chú quan trọng:
+Luật nghiệp vụ hoặc quyết định thiết kế cần nhớ.
+```
+
+For important classes, explain:
+
+- class represents what,
+- important fields and what each field stores,
+- a small example object/output,
+- how to recreate the class from scratch.
+
+For important functions, include:
+
+```text
+Hàm này làm gì.
+
+Biến đầu vào:
+- input_a: ý nghĩa.
+
+Ví dụ output:
+input -> output mẫu.
+
+Cách tự viết lại:
+Các bước tối thiểu để dựng lại hàm này.
+```
+
+Project rules to keep visible in code:
+
+- User asking about a topic is not the same as liking that topic.
+- Only explicit preferences such as "Tôi thích lễ hội" should update long-term memory.
+- Memory personalizes focus, tone, and recommendations; it is not factual evidence.
+- RAG answers must be grounded in retrieved documents.
+
 ## Module Pattern
 
 When writing new code, prefer this layout:

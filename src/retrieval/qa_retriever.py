@@ -1,13 +1,22 @@
 """
-Retrieve QA chunks from the Chroma hybrid QA index.
+Retriever Chroma cho các QA chunks của VietCulture.
 
-Overall flow:
-user query -> E5 query embedding -> broad Chroma search -> lexical rerank
--> readable results -> RAG context
+Mục đích file:
+Load Chroma index đã build sẵn và lấy các QA chunks liên quan nhất cho RAG hoặc
+recommendation cá nhân hóa.
 
-The hybrid index is expected to contain compact QA chunks and topic cards with
-metadata such as `retrieval_anchor`, `canonical_topic`, `aliases`, and
-`question_type`.
+Flow runtime:
+QaRetriever.retrieve(query)
+-> embed query bằng E5
+-> Chroma similarity_search_with_score()
+-> score_lexical_match()
+-> kết hợp vector score + lexical rerank
+-> trả top-k RetrievedQaChunk
+
+Ghi chú project hiện tại:
+App mặc định dùng `chroma_db` với collection `langchain` khi
+`QA_RETRIEVER_PROFILE=legacy`. Phần chunking/embedding có thể chạy trên Kaggle
+hoặc máy GPU, sau đó copy thư mục Chroma về project local.
 """
 
 from __future__ import annotations
@@ -102,7 +111,15 @@ METADATA_FIELDS_FOR_MATCHING = [
 # =============================================================================
 
 def normalize_for_matching(text: Any) -> str:
-    """Normalize Vietnamese/English text into simple ASCII tokens."""
+    """
+    Normalize text thành token ASCII để so khớp lexical.
+
+    Ví dụ output:
+    normalize_for_matching("Thảm cói!") -> "tham coi"
+
+    Cách tự viết lại:
+    Lowercase, bỏ dấu Unicode, thay ký tự không phải chữ/số bằng khoảng trắng.
+    """
 
     if text is None:
         return ""
@@ -119,10 +136,14 @@ def normalize_for_matching(text: Any) -> str:
 
 def extract_query_tokens(query: str) -> list[str]:
     """
-    Keep only topic-bearing tokens from a user query.
+    Lấy các token quan trọng trong query, bỏ stopwords.
 
-    Example:
+    Ví dụ output:
     "Y nghia van hoa cua tham coi la gi?" -> ["tham", "coi"]
+
+    Cách tự viết lại:
+    Normalize query, split thành token, bỏ token quá ngắn và token trong
+    VIETNAMESE_STOPWORDS.
     """
 
     normalized_query = normalize_for_matching(query)
@@ -136,7 +157,16 @@ def extract_query_tokens(query: str) -> list[str]:
 
 
 def metadata_text_for_matching(metadata: dict[str, Any]) -> str:
-    """Join the metadata fields that should influence lexical reranking."""
+    """
+    Ghép các field metadata quan trọng thành text để rerank lexical.
+
+    Ví dụ output:
+    "Bánh tét banh tet am_thuc cultural ..."
+
+    Cách tự viết lại:
+    Chọn các metadata field liên quan topic/question/category, lấy value và join
+    thành một chuỗi.
+    """
 
     field_values = [
         str(metadata.get(field_name, ""))
@@ -146,7 +176,16 @@ def metadata_text_for_matching(metadata: dict[str, Any]) -> str:
 
 
 def build_searchable_text(document: Any) -> str:
-    """Combine metadata and page content into one normalized search surface."""
+    """
+    Tạo text surface để match query với document.
+
+    Ví dụ output:
+    metadata + page_content -> "banh tet am thuc y nghia..."
+
+    Cách tự viết lại:
+    Ghép metadata_text_for_matching(metadata) với document.page_content, rồi
+    normalize_for_matching().
+    """
 
     metadata = document.metadata or {}
     return normalize_for_matching(
@@ -161,10 +200,14 @@ def build_searchable_text(document: Any) -> str:
 
 def extract_query_phrases(query: str) -> list[str]:
     """
-    Extract short topic phrases that should be covered together.
+    Lấy các cụm 2 từ quan trọng trong query.
 
-    This helps multi-entity questions such as "so sánh bánh chưng và bánh tét".
-    Single-token matching is not enough there because "bánh" is too generic.
+    Ví dụ output:
+    "so sánh bánh chưng và bánh tét" -> ["banh chung", "banh tet"]
+
+    Cách tự viết lại:
+    Tạo bigram từ token query, bỏ bigram toàn stopword. Với object phổ biến như
+    "banh", "ao", "non", "xe", giữ cụm 2 từ vì token đầu thường quá chung.
     """
 
     normalized_query = normalize_for_matching(query)
@@ -187,7 +230,16 @@ def extract_query_phrases(query: str) -> list[str]:
 
 
 def detect_query_intent(query: str) -> str:
-    """Detect the query shape that should influence retrieval reranking."""
+    """
+    Nhận diện dạng câu hỏi để rerank phù hợp.
+
+    Ví dụ output:
+    detect_query_intent("So sánh bánh chưng và bánh tét") -> "comparison"
+
+    Cách tự viết lại:
+    Normalize query, check các marker như "so sanh", "nguon goc", "la gi", rồi
+    trả nhãn intent retrieval đơn giản.
+    """
 
     normalized_query = normalize_for_matching(query)
 
@@ -205,10 +257,14 @@ def detect_query_intent(query: str) -> str:
 
 def score_entity_coverage(query: str, document: Any) -> float:
     """
-    Reward documents that cover all important entities in a multi-topic query.
+    Cộng điểm cho document bao phủ đủ entity trong query nhiều chủ đề.
 
-    For example, a chunk mentioning both "bánh chưng" and "bánh tét" is more
-    useful for a comparison query than a chunk about only bánh chưng.
+    Ví dụ output:
+    Query có "bánh chưng" và "bánh tét", document có cả hai -> score 1.2.
+
+    Cách tự viết lại:
+    Extract phrase quan trọng từ query, kiểm tra phrase nào xuất hiện trong
+    metadata/content. Càng phủ đủ entity thì cộng điểm càng cao.
     """
 
     query_phrases = extract_query_phrases(query)
@@ -245,7 +301,16 @@ def score_entity_coverage(query: str, document: Any) -> float:
 
 
 def score_intent_match(query: str, document: Any) -> float:
-    """Reward chunks whose metadata/content matches the user's question intent."""
+    """
+    Cộng điểm nếu document hợp dạng câu hỏi của user.
+
+    Ví dụ output:
+    Query dạng comparison và metadata question_type="comparison" -> cộng điểm.
+
+    Cách tự viết lại:
+    Detect query intent, đọc metadata question_type, rồi cộng điểm theo rule
+    riêng cho comparison/origin/identification.
+    """
 
     metadata = document.metadata or {}
     question_type = str(metadata.get("question_type", ""))
@@ -295,12 +360,21 @@ def score_intent_match(query: str, document: Any) -> float:
 
 def score_lexical_match(query: str, document: Any) -> float:
     """
-    Score how strongly a result matches the topic words in the query.
+    Tính điểm lexical/topic match giữa query và document.
 
-    The score is intentionally simple and explainable:
-    - overlap with metadata/page tokens gives the base score.
-    - exact phrase match in topic/anchor metadata gives a stronger boost.
-    - topic-card chunks get a small boost for broad/recommendation questions.
+    Điểm gồm:
+    - overlap token query với metadata/page_content.
+    - exact phrase match trong metadata/content.
+    - topic-card boost nhỏ.
+    - entity coverage score.
+    - intent match score.
+
+    Ví dụ output:
+    score_lexical_match("xe máy là gì", doc_xe_may) -> 2.3
+
+    Cách tự viết lại:
+    Tính từng điểm con thật dễ giải thích, sau đó cộng lại. Không nên làm quá
+    phức tạp nếu mục tiêu là baseline dễ debug.
     """
 
     query_tokens = extract_query_tokens(query)
@@ -361,7 +435,23 @@ def score_lexical_match(query: str, document: Any) -> float:
 
 @dataclass(frozen=True)
 class RetrievedQaChunk:
-    """A retrieved chunk plus vector, lexical, and final rerank scores."""
+    """
+    Một kết quả retrieval sau khi đã tính score.
+
+    Biến:
+    - document: LangChain Document lấy từ Chroma.
+    - vector_score: score/distance gốc từ Chroma, thấp hơn là tốt hơn.
+    - lexical_score: điểm match keyword/topic do mình tự tính, cao hơn là tốt hơn.
+    - final_score: score cuối để sort, thấp hơn là tốt hơn.
+    - rank: thứ hạng sau rerank.
+
+    Ví dụ output:
+    RetrievedQaChunk(document=Document(...), vector_score=0.42, lexical_score=1.5, final_score=0.33, rank=1)
+
+    Cách tự viết lại:
+    Dùng dataclass để gom document và các score lại, giúp debug retrieval dễ hơn
+    thay vì chỉ trả Document trần.
+    """
 
     document: Any
     vector_score: float
@@ -377,13 +467,30 @@ class RetrievedQaChunk:
 
     @property
     def metadata(self) -> dict[str, Any]:
-        """Return Chroma/LangChain document metadata."""
+        """
+        Trả metadata của document.
+
+        Ví dụ output:
+        {"category": "am_thuc", "topic": "bánh tét"}
+
+        Cách tự viết lại:
+        Expose `self.document.metadata` qua property để code debug ngắn hơn.
+        """
 
         return self.document.metadata
 
     @property
     def page_content(self) -> str:
-        """Return the text content stored in Chroma."""
+        """
+        Trả nội dung text đã lưu trong Chroma.
+
+        Ví dụ output:
+        "Question:\\n...\\nAnswer:\\n..."
+
+        Cách tự viết lại:
+        Expose `self.document.page_content` qua property để code format context
+        đọc dễ hơn.
+        """
 
         return self.document.page_content
 
@@ -393,7 +500,16 @@ class RetrievedQaChunk:
 # =============================================================================
 
 class QaRetriever:
-    """Load a hybrid QA Chroma index and retrieve reranked QA chunks."""
+    """
+    Retriever load Chroma index và trả QA chunks đã rerank.
+
+    Ví dụ khởi tạo hiện tại:
+    QaRetriever(persist_directory="D:/Ds107/chroma_db", collection_name="langchain")
+
+    Cách tự viết lại:
+    Trong __init__, load Chroma với embedding function. Trong retrieve(), search
+    rộng bằng vector, chấm lại bằng lexical score, sort và trả top_k.
+    """
 
     def __init__(
         self,
@@ -427,11 +543,21 @@ class QaRetriever:
         use_rerank: bool = True,
     ) -> list[RetrievedQaChunk]:
         """
-        Retrieve top QA chunks for a query.
+        Retrieve top QA chunks cho một query.
 
-        Chroma returns vector distance, so lower is better. Hybrid rerank lowers
-        the final score when topic words match metadata such as retrieval anchor,
-        canonical topic, aliases, or question.
+        Biến đầu vào:
+        - query: câu search.
+        - top_k: số chunks cuối cùng trả về.
+        - fetch_k: số candidates lấy từ Chroma trước rerank.
+        - max_score: lọc bỏ chunk có final_score quá cao.
+        - use_rerank: bật/tắt lexical rerank.
+
+        Ví dụ output:
+        [RetrievedQaChunk(rank=1, metadata={"topic": "xe máy"}, ...), ...]
+
+        Cách tự viết lại:
+        Gọi Chroma lấy nhiều candidates, tính _score_candidate() cho từng
+        document, sort theo final_score tăng dần, rồi lấy top_k.
         """
 
         candidate_count = fetch_k or max(top_k * DEFAULT_FETCH_MULTIPLIER, top_k)
@@ -476,7 +602,19 @@ class QaRetriever:
         retrieved_chunks: list[RetrievedQaChunk],
         max_chars_per_chunk: int = 1200,
     ) -> str:
-        """Format retrieved chunks into a compact context block for an LLM."""
+        """
+        Format retrieved chunks thành context block cho LLM.
+
+        Ví dụ output:
+        [Source 1]
+        Final Score: ...
+        Category: am_thuc
+        ...
+
+        Cách tự viết lại:
+        Lặp qua chunks, in score + metadata trace nguồn + page_content đã cắt
+        ngắn để prompt không quá dài.
+        """
 
         context_blocks: list[str] = []
 
@@ -514,7 +652,16 @@ class QaRetriever:
         retrieved_chunks: list[RetrievedQaChunk],
         content_preview_chars: int = 700,
     ) -> None:
-        """Print retrieval results with metadata humans need to inspect."""
+        """
+        In kết quả retrieval ra terminal để debug bằng mắt.
+
+        Ví dụ output:
+        RANK 1 | FINAL 0.123 | VECTOR 0.200 | LEXICAL 1.200
+
+        Cách tự viết lại:
+        In query/index/collection, rồi với từng chunk in score, metadata quan
+        trọng và preview page_content.
+        """
 
         print("=" * 80)
         print("QUERY:", query)
@@ -553,7 +700,20 @@ class QaRetriever:
         vector_score: float,
         use_rerank: bool,
     ) -> RetrievedQaChunk:
-        """Combine vector distance and lexical topic matching."""
+        """
+        Kết hợp vector distance và lexical score thành final_score.
+
+        Công thức hiện tại:
+        final_score = vector_score - lexical_weight * lexical_score + penalty
+
+        Ví dụ output:
+        vector_score=0.5, lexical_score=2.0, lexical_weight=0.06
+        -> final_score khoảng 0.38
+
+        Cách tự viết lại:
+        Vì Chroma distance thấp hơn là tốt hơn, lexical match tốt thì phải làm
+        final_score thấp xuống. Nếu không có lexical match thì thêm penalty nhẹ.
+        """
 
         if not use_rerank:
             return RetrievedQaChunk(
@@ -590,7 +750,16 @@ class QaRetriever:
 # =============================================================================
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for retrieval preview."""
+    """
+    Parse CLI args để preview retrieval.
+
+    Ví dụ command:
+    python src/retrieval/qa_retriever.py --query "Xe máy là gì?"
+
+    Cách tự viết lại:
+    Dùng argparse và expose các tham số quan trọng: persist-dir, collection,
+    model, device, query, top-k, fetch-k.
+    """
 
     parser = argparse.ArgumentParser(
         description="Preview retrieval from the hybrid Chroma QA index."
@@ -653,7 +822,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Load the retriever and print retrieval results for one query."""
+    """
+    Entry point CLI: load retriever và in kết quả cho một query.
+
+    Ví dụ output:
+    QUERY: Xe máy là gì?
+    RANK 1 | FINAL ...
+
+    Cách tự viết lại:
+    Parse args, tạo QaRetriever, gọi retrieve(), rồi print_results().
+    """
 
     args = parse_args()
 

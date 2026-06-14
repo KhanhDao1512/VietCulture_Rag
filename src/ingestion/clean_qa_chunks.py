@@ -1,11 +1,23 @@
 """
-Create clean QA chunks from the Vietnamese VQA dataset.
+Tạo QA chunks sạch từ Vietnamese VQA dataset.
 
-The dataset has image fields, but this module is NLP-first:
-- A QA pair is the main retrieval unit.
-- The canonical topic comes from QA/object content first.
-- `keyword` is kept as an alias because it can be noisy or mismatched.
-- `image_id` and `image_path` are kept only for source tracing.
+Mục đích file:
+Chuyển raw VQA records thành text chunks hữu ích cho embedding và RAG. File này
+chưa build vector; nó chỉ chuẩn bị documents sạch.
+
+Flow chunking:
+load_dataset()
+-> build_qa_chunks()
+-> resolve_canonical_topic()
+-> build_page_content()
+-> build_metadata()
+-> convert_to_langchain_documents()
+
+Quy ước dữ liệu:
+- Một QA pair là đơn vị retrieval chính.
+- Canonical topic ưu tiên lấy từ QA/object content trước.
+- `keyword` giữ lại như alias vì có thể nhiễu hoặc lệch topic thật.
+- `image_id` và `image_path` chỉ dùng để trace nguồn.
 """
 
 from __future__ import annotations
@@ -59,7 +71,16 @@ MAX_TOPIC_WORDS = 12
 
 @dataclass(frozen=True)
 class ResolvedTopic:
-    """Canonical topic and the source field used to resolve it."""
+    """
+    Topic chuẩn của một sample và nguồn dùng để suy ra topic đó.
+
+    Ví dụ output:
+    ResolvedTopic(text="bánh tét", source="identification_answer")
+
+    Cách tự viết lại:
+    Tạo dataclass nhỏ gồm text topic và source để khi debug biết topic đến từ
+    answer, primary object hay keyword fallback.
+    """
 
     text: str
     source: str
@@ -67,7 +88,20 @@ class ResolvedTopic:
 
 @dataclass(frozen=True)
 class QaChunk:
-    """Clean chunk format used before optional LangChain conversion."""
+    """
+    Format chunk sạch trước khi convert sang LangChain Document.
+
+    Biến:
+    - page_content: text chính sẽ được embed.
+    - metadata: thông tin dùng để filter/debug/rerank.
+
+    Ví dụ output:
+    QaChunk(page_content="Question: ...", metadata={"category": "am_thuc"})
+
+    Cách tự viết lại:
+    Tách rõ nội dung embed và metadata trace nguồn. Sau đó có thể convert thành
+    Document(page_content=..., metadata=...).
+    """
 
     page_content: str
     metadata: dict[str, Any]
@@ -78,14 +112,32 @@ class QaChunk:
 # =============================================================================
 
 def load_dataset(dataset_path: str | Path) -> list[dict[str, Any]]:
-    """Load the raw JSON dataset."""
+    """
+    Đọc raw JSON dataset.
+
+    Ví dụ output:
+    [{"image_id": "...", "category": "am_thuc", "questions": [...]}]
+
+    Cách tự viết lại:
+    Mở file bằng UTF-8 và json.load() thành list dict.
+    """
 
     with Path(dataset_path).open("r", encoding="utf-8") as dataset_file:
         return json.load(dataset_file)
 
 
 def safe_text(value: Any) -> str:
-    """Convert strings, lists, and empty values into a clean display string."""
+    """
+    Chuyển giá trị bất kỳ thành string sạch để đưa vào chunk.
+
+    Ví dụ output:
+    safe_text(["a", "b"]) -> "a, b"
+    safe_text(None) -> ""
+
+    Cách tự viết lại:
+    Nếu None thì trả "", nếu list thì join phần tử không rỗng, còn lại cast str
+    và strip.
+    """
 
     if value is None:
         return ""
@@ -98,10 +150,14 @@ def safe_text(value: Any) -> str:
 
 def normalize_text(value: Any) -> str:
     """
-    Normalize text for matching and deduplication.
+    Normalize text để matching và dedup.
 
-    Keep this output for internal keys only. Do not show normalized text to users
-    because Vietnamese accents are intentionally removed.
+    Ví dụ output:
+    normalize_text("Bánh Tét!") -> "banh tet"
+
+    Cách tự viết lại:
+    Chuyển lowercase, bỏ dấu tiếng Việt, bỏ ký tự đặc biệt, collapse khoảng
+    trắng. Chỉ dùng output này cho key nội bộ, không hiển thị cho user.
     """
 
     text = safe_text(value).lower()
@@ -126,10 +182,14 @@ def normalize_text(value: Any) -> str:
 
 def remove_topic_wrapper(topic_candidate: Any) -> str:
     """
-    Remove common VQA wrappers while preserving Vietnamese display text.
+    Bỏ các wrapper thường gặp quanh topic.
 
-    Example:
+    Ví dụ output:
     "Có vẻ là món nhộng ong." -> "món nhộng ong"
+
+    Cách tự viết lại:
+    Normalize candidate để nhận diện prefix như "day la", nhưng khi cắt thì cắt
+    trên display text gốc để giữ dấu tiếng Việt.
     """
 
     display_topic = safe_text(topic_candidate).strip(" .,:;!?")
@@ -149,9 +209,14 @@ def remove_topic_wrapper(topic_candidate: Any) -> str:
 
 def is_identification_question(question_record: dict[str, Any]) -> bool:
     """
-    Detect QA records whose answer probably names the item/topic.
+    Kiểm tra QA record có phải câu hỏi nhận diện object/topic không.
 
-    These answers are more trustworthy than `keyword` for this dataset.
+    Ví dụ output:
+    question_type="identification" -> True
+
+    Cách tự viết lại:
+    Check question_type trước, sau đó fallback bằng pattern câu hỏi như "đây là
+    gì", "món ăn này là gì". Answer của dạng này thường là topic đáng tin hơn keyword.
     """
 
     question_type = normalize_text(question_record.get("question_type"))
@@ -164,7 +229,15 @@ def is_identification_question(question_record: dict[str, Any]) -> bool:
 
 
 def is_usable_topic(topic_candidate: Any) -> bool:
-    """Reject empty or overly long topic candidates."""
+    """
+    Loại topic rỗng hoặc quá dài.
+
+    Ví dụ output:
+    is_usable_topic("bánh tét") -> True
+
+    Cách tự viết lại:
+    Normalize topic, nếu rỗng thì False, nếu số từ vượt MAX_TOPIC_WORDS thì False.
+    """
 
     normalized_topic = normalize_text(topic_candidate)
     if not normalized_topic:
@@ -174,7 +247,17 @@ def is_usable_topic(topic_candidate: Any) -> bool:
 
 
 def resolve_topic_from_identification_answer(sample: dict[str, Any]) -> ResolvedTopic | None:
-    """Use the answer to a generic identification question as the first choice."""
+    """
+    Lấy topic từ answer của câu hỏi identification nếu có.
+
+    Ví dụ output:
+    sample có Q "Đây là món gì?" A "Bánh tét"
+    -> ResolvedTopic("Bánh tét", "identification_answer")
+
+    Cách tự viết lại:
+    Duyệt questions trong sample, tìm câu identification, làm sạch answer bằng
+    remove_topic_wrapper(), rồi trả ResolvedTopic nếu topic usable.
+    """
 
     for question_record in sample.get("questions", []) or []:
         if not is_identification_question(question_record):
@@ -188,7 +271,15 @@ def resolve_topic_from_identification_answer(sample: dict[str, Any]) -> Resolved
 
 
 def resolve_topic_from_primary_object(sample: dict[str, Any]) -> ResolvedTopic | None:
-    """Use `primary_cultural_objects[0]` when QA answers do not give a topic."""
+    """
+    Lấy topic từ `primary_cultural_objects` khi answer không cho topic rõ.
+
+    Ví dụ output:
+    primary_cultural_objects=["áo dài"] -> ResolvedTopic("áo dài", "primary_cultural_object")
+
+    Cách tự viết lại:
+    Lấy list object từ cultural_context, chọn object đầu tiên usable làm topic.
+    """
 
     cultural_context = sample.get("cultural_context", {}) or {}
     primary_objects = cultural_context.get("primary_cultural_objects", []) or []
@@ -203,12 +294,19 @@ def resolve_topic_from_primary_object(sample: dict[str, Any]) -> ResolvedTopic |
 
 def resolve_canonical_topic(sample: dict[str, Any]) -> ResolvedTopic:
     """
-    Resolve the true NLP topic for a sample.
+    Chọn canonical topic tốt nhất cho một sample.
 
-    Fallback order:
+    Thứ tự fallback:
     1. Answer of an identification question.
     2. First primary cultural object.
     3. Dataset keyword.
+
+    Ví dụ output:
+    ResolvedTopic(text="bánh chưng", source="identification_answer")
+
+    Cách tự viết lại:
+    Thử từng nguồn theo độ tin cậy giảm dần. Nguồn nào trả topic usable trước
+    thì dùng, cuối cùng mới fallback sang keyword.
     """
 
     topic_from_answer = resolve_topic_from_identification_answer(sample)
@@ -229,10 +327,14 @@ def resolve_canonical_topic(sample: dict[str, Any]) -> ResolvedTopic:
 
 def build_topic_aliases(sample: dict[str, Any], topic: str) -> list[str]:
     """
-    Build alternate names for retrieval recall.
+    Tạo alias topic để tăng recall retrieval.
 
-    The aliases can include noisy keywords, but aliases do not decide the
-    canonical topic.
+    Ví dụ output:
+    ["Bánh tét", "banh tet", "am_thuc"]
+
+    Cách tự viết lại:
+    Gom canonical topic, keyword, category, cultural_category, primary objects.
+    Deduplicate bằng normalized form để tránh alias trùng.
     """
 
     cultural_context = sample.get("cultural_context", {}) or {}
@@ -271,7 +373,26 @@ def build_page_content(
     resolved_topic: ResolvedTopic,
     topic_aliases: list[str],
 ) -> str:
-    """Create the text that will be embedded into Chroma later."""
+    """
+    Tạo text chính sẽ được embed vào Chroma.
+
+    Biến đầu vào:
+    - sample: raw record.
+    - question_record: một QA trong sample.
+    - resolved_topic/topic_aliases: topic chuẩn và alias.
+
+    Ví dụ output rút gọn:
+    Chunk Type: qa_chunk
+    Canonical Topic: Bánh tét
+    Question:
+    Ý nghĩa văn hóa của bánh tét là gì?
+    Answer:
+    ...
+
+    Cách tự viết lại:
+    Ghép các section ổn định như Question, Answer, Cultural Significance. Section
+    label rõ giúp LLM và hàm extract_content_section đọc dễ hơn.
+    """
 
     cultural_context = sample.get("cultural_context", {}) or {}
     additional_context = question_record.get("additional_context", {}) or {}
@@ -326,7 +447,16 @@ def build_metadata(
     resolved_topic: ResolvedTopic,
     topic_aliases: list[str],
 ) -> dict[str, Any]:
-    """Create metadata used for tracing, filtering, and debugging."""
+    """
+    Tạo metadata cho chunk để trace/filter/rerank.
+
+    Ví dụ output:
+    {"category": "am_thuc", "topic": "Bánh tét", "question_type": "cultural"}
+
+    Cách tự viết lại:
+    Lưu các field ngắn, ổn định: doc_id, category, topic, normalized_topic,
+    question_type, image_id. Không nhét text quá dài vào metadata.
+    """
 
     question_text = safe_text(question_record.get("question"))
     category = safe_text(sample.get("category"))
@@ -354,7 +484,16 @@ def build_metadata(
 
 
 def build_qa_chunk(sample: dict[str, Any], question_record: dict[str, Any]) -> QaChunk:
-    """Build one clean QA chunk from one sample and one question."""
+    """
+    Build một QaChunk từ một sample và một question.
+
+    Ví dụ output:
+    QaChunk(page_content="Chunk Type: qa_chunk...", metadata={...})
+
+    Cách tự viết lại:
+    Resolve topic, build aliases, build page_content, build metadata, rồi trả
+    QaChunk.
+    """
 
     resolved_topic = resolve_canonical_topic(sample)
     topic_aliases = build_topic_aliases(sample, resolved_topic.text)
@@ -381,10 +520,14 @@ def build_dedup_key(
     resolved_topic: ResolvedTopic,
 ) -> tuple[str, str, str, str]:
     """
-    Build a dedup key that ignores `image_id`.
+    Tạo key dedup, cố ý bỏ qua `image_id`.
 
-    The same QA idea can appear under many images; for NLP retrieval, we keep
-    the topic/question identity and only use image fields for tracing.
+    Ví dụ output:
+    ("am_thuc", "banh tet", "cultural", "y nghia van hoa cua banh tet la gi")
+
+    Cách tự viết lại:
+    Key nên dựa trên category + normalized topic + question_type + normalized
+    question. Không dùng image_id vì cùng một ý QA có thể lặp ở nhiều ảnh.
     """
 
     return (
@@ -396,7 +539,16 @@ def build_dedup_key(
 
 
 def build_qa_chunks(dataset_records: list[dict[str, Any]]) -> list[QaChunk]:
-    """Build deduplicated QA chunks from raw dataset records."""
+    """
+    Build toàn bộ QA chunks đã dedup từ raw records.
+
+    Ví dụ output:
+    [QaChunk(...), QaChunk(...)]
+
+    Cách tự viết lại:
+    Duyệt từng sample, resolve topic một lần, duyệt questions, bỏ question rỗng,
+    tạo dedup key, rồi append chunk nếu key chưa gặp.
+    """
 
     qa_chunks: list[QaChunk] = []
     seen_dedup_keys: set[tuple[str, str, str, str]] = set()
@@ -423,7 +575,16 @@ def build_qa_chunks(dataset_records: list[dict[str, Any]]) -> list[QaChunk]:
 # =============================================================================
 
 def convert_to_langchain_documents(qa_chunks: list[QaChunk]) -> list[Any]:
-    """Convert clean chunks to LangChain Document objects."""
+    """
+    Convert QaChunk sang LangChain Document.
+
+    Ví dụ output:
+    Document(page_content=chunk.page_content, metadata=chunk.metadata)
+
+    Cách tự viết lại:
+    Với mỗi QaChunk, truyền page_content và metadata vào Document. Hàm này là
+    cầu nối giữa format nội bộ và Chroma/LangChain.
+    """
 
     if Document is None:
         raise ImportError(
@@ -438,7 +599,15 @@ def convert_to_langchain_documents(qa_chunks: list[QaChunk]) -> list[Any]:
 
 
 def build_clean_qa_documents(dataset_path: str | Path) -> list[Any]:
-    """Load dataset, build QA chunks, and convert them to LangChain Documents."""
+    """
+    Hàm tiện lợi: raw dataset -> LangChain Documents.
+
+    Ví dụ output:
+    build_clean_qa_documents("vietnamese_vqa_dataset.json") -> [Document(...)]
+
+    Cách tự viết lại:
+    Gọi load_dataset(), build_qa_chunks(), rồi convert_to_langchain_documents().
+    """
 
     dataset_records = load_dataset(dataset_path)
     qa_chunks = build_qa_chunks(dataset_records)
@@ -451,7 +620,16 @@ def build_clean_qa_documents(dataset_path: str | Path) -> list[Any]:
 # =============================================================================
 
 def summarize_chunks(qa_chunks: list[QaChunk]) -> dict[str, Any]:
-    """Return lightweight stats for notebook or terminal debugging."""
+    """
+    Tạo thống kê nhanh để debug chất lượng chunk.
+
+    Ví dụ output:
+    {"total_chunks": 1200, "categories": Counter({"am_thuc": 100, ...})}
+
+    Cách tự viết lại:
+    Dùng Counter đếm chunk_type, category, topic_source để biết dataset sau
+    chunking có bị lệch category hay nguồn topic không.
+    """
 
     return {
         "total_chunks": len(qa_chunks),
@@ -462,7 +640,16 @@ def summarize_chunks(qa_chunks: list[QaChunk]) -> dict[str, Any]:
 
 
 def print_summary(qa_chunks: list[QaChunk]) -> None:
-    """Print chunk counts in a compact, human-readable format."""
+    """
+    In summary chunk ra terminal.
+
+    Ví dụ output:
+    Total chunks: 1200
+    Chunk types: {"qa_chunk": 1200}
+
+    Cách tự viết lại:
+    Gọi summarize_chunks(), rồi print các trường quan trọng ở dạng dễ đọc.
+    """
 
     summary = summarize_chunks(qa_chunks)
 
@@ -473,7 +660,17 @@ def print_summary(qa_chunks: list[QaChunk]) -> None:
 
 
 def print_chunk_preview(qa_chunks: list[QaChunk], limit: int = 5) -> None:
-    """Print sample chunks so humans can inspect topic and metadata quality."""
+    """
+    In một vài chunk mẫu để con người kiểm tra.
+
+    Ví dụ output:
+    CHUNK 1
+    Topic: Bánh tét
+    Question: Ý nghĩa văn hóa...
+
+    Cách tự viết lại:
+    Duyệt vài chunk đầu, in topic/source/keyword/question và một đoạn page_content.
+    """
 
     for chunk_index, chunk in enumerate(qa_chunks[:limit], start=1):
         metadata = chunk.metadata
@@ -496,7 +693,16 @@ def preview_dataset_chunks(
     sample_size: int | None = 100,
     preview_limit: int = 5,
 ) -> list[QaChunk]:
-    """Load a dataset slice, build chunks, print summary, and print examples."""
+    """
+    Preview chunking trên một phần dataset.
+
+    Ví dụ output:
+    In summary + 5 chunk mẫu, đồng thời trả list QaChunk.
+
+    Cách tự viết lại:
+    Load dataset, lấy sample_size records nếu cần, build chunks, print summary
+    và preview để kiểm tra trước khi build Chroma thật.
+    """
 
     dataset_records = load_dataset(dataset_path)
 
@@ -516,7 +722,15 @@ def preview_dataset_chunks(
 # =============================================================================
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments for local preview runs."""
+    """
+    Parse CLI args cho việc preview chunking.
+
+    Ví dụ command:
+    python src/ingestion/clean_qa_chunks.py --dataset vietnamese_vqa_dataset.json
+
+    Cách tự viết lại:
+    Dùng argparse, expose dataset path, sample size và số chunk preview.
+    """
 
     parser = argparse.ArgumentParser(
         description="Preview clean QA chunks before building a vector index."
@@ -543,7 +757,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run a terminal preview of the chunking result."""
+    """
+    Entry point CLI để preview kết quả chunking.
+
+    Ví dụ output:
+    Total chunks, category counts, và vài chunk mẫu.
+
+    Cách tự viết lại:
+    Parse args, đổi sample_size=0 thành None, rồi gọi preview_dataset_chunks().
+    """
 
     args = parse_args()
     sample_size = None if args.sample_size == 0 else args.sample_size

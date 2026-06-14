@@ -1,10 +1,23 @@
 """
-Build a Chroma index from clean QA chunks.
+Build hoặc load Chroma index từ QA chunks sạch.
 
-Overall flow:
-raw JSON dataset -> clean QA chunks -> LangChain Documents -> embeddings -> Chroma DB
+Mục đích file:
+Biến raw Vietnamese VQA dataset thành vector database lưu trên disk. Đây là bước
+embedding nặng, nên có thể chạy file này trên Kaggle/GPU rồi copy thư mục
+Chroma về project local.
 
-Use `--sample-size` for a small local test before building the full index.
+Flow build embedding:
+raw JSON dataset
+-> load_clean_documents()
+-> clean_qa_chunks.build_qa_chunks()
+-> E5Embeddings.embed_documents()
+-> Chroma.from_documents()
+-> thư mục Chroma DB đã persist
+
+Flow load runtime:
+QaRetriever
+-> load_chroma_index()
+-> Chroma(..., embedding_function=E5Embeddings)
 """
 
 from __future__ import annotations
@@ -40,10 +53,17 @@ DEFAULT_HF_CACHE_DIR = PROJECT_ROOT / ".cache" / "huggingface"
 
 def load_hf_token_from_env_file(env_file: str | Path = DEFAULT_ENV_FILE) -> None:
     """
-    Load HF_TOKEN from a local .env file when it is not already in the process.
+    Đọc HF_TOKEN từ file `.env` nếu process hiện tại chưa có token.
 
-    This keeps HuggingFace requests authenticated without printing or exposing
-    the token value.
+    Biến đầu vào:
+    - env_file: đường dẫn file `.env`, mặc định là project `.env`.
+
+    Ví dụ output:
+    os.environ["HF_TOKEN"] được set, nhưng token không bị print ra terminal.
+
+    Cách tự viết lại:
+    Set cache folder trước, kiểm tra env đã có HF_TOKEN chưa. Nếu chưa, đọc từng
+    dòng `.env`, tìm key HF_TOKEN và đưa value vào os.environ.
     """
 
     DEFAULT_HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -79,10 +99,18 @@ def select_category_balanced_records(
     sample_size: int | None,
 ) -> list[dict[str, Any]]:
     """
-    Select a small preview dataset with category coverage.
+    Chọn sample nhỏ nhưng vẫn cân bằng category.
 
-    The raw dataset is grouped by category, so taking the first N records can
-    produce a misleading test index that only contains one category.
+    Biến đầu vào:
+    - dataset_records: list raw records từ dataset JSON.
+    - sample_size: số record muốn lấy để test index nhỏ.
+
+    Ví dụ output:
+    sample_size=24 với 12 category -> mỗi category được lấy khoảng 2 records.
+
+    Cách tự viết lại:
+    Group records theo category, rồi vòng qua từng category để lấy lần lượt.
+    Không nên chỉ lấy N record đầu vì dataset có thể đang grouped theo category.
     """
 
     if sample_size is None or sample_size >= len(dataset_records):
@@ -127,11 +155,18 @@ def select_category_balanced_records(
 
 class E5Embeddings:
     """
-    Wrap HuggingFaceEmbeddings with the prefixes expected by E5 models.
+    Wrapper cho HuggingFaceEmbeddings theo format E5.
 
-    E5 models are trained with:
-    - `passage: ...` for stored documents.
-    - `query: ...` for user queries.
+    E5 model được train với prefix:
+    - `passage: ...` cho documents lưu vào Chroma.
+    - `query: ...` cho câu hỏi của user.
+
+    Ví dụ output:
+    embed_query("Bánh tét là gì?") -> list[float] vector embedding.
+
+    Cách tự viết lại:
+    Bọc model embedding gốc trong class có hai hàm `embed_documents()` và
+    `embed_query()`, thêm prefix đúng trước khi gọi model thật.
     """
 
     def __init__(self, model_name: str, device: str) -> None:
@@ -147,13 +182,29 @@ class E5Embeddings:
         )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed stored QA chunks as E5 passages."""
+        """
+        Embed các QA chunks trước khi lưu vào Chroma.
+
+        Ví dụ input/output:
+        ["Question: ... Answer: ..."] -> [[0.01, -0.02, ...], ...]
+
+        Cách tự viết lại:
+        Thêm prefix `passage: ` cho mỗi text rồi gọi embed_documents của model.
+        """
 
         passages = [f"passage: {text}" for text in texts]
         return self.embedding_model.embed_documents(passages)
 
     def embed_query(self, text: str) -> list[float]:
-        """Embed a user query as an E5 query."""
+        """
+        Embed query runtime của user.
+
+        Ví dụ output:
+        "query: Xe máy là gì?" -> [0.03, 0.12, ...]
+
+        Cách tự viết lại:
+        Thêm prefix `query: ` cho câu hỏi rồi gọi embed_query của model.
+        """
 
         return self.embedding_model.embed_query(f"query: {text}")
 
@@ -167,10 +218,18 @@ def load_clean_documents(
     sample_size: int | None,
 ) -> list[Any]:
     """
-    Load the dataset and convert clean QA chunks into LangChain Documents.
+    Load dataset và chuyển QA chunks sạch thành LangChain Documents.
 
-    `sample_size` limits raw dataset records, not final chunks. This is useful
-    for fast smoke tests before building the full Chroma index.
+    Biến đầu vào:
+    - dataset_path: đường dẫn `vietnamese_vqa_dataset.json`.
+    - sample_size: giới hạn số raw records, không phải số chunks cuối.
+
+    Ví dụ output:
+    [Document(page_content="Question: ...", metadata={"category": "am_thuc"})]
+
+    Cách tự viết lại:
+    Load raw JSON, chọn sample cân bằng nếu cần, build QA chunks, in summary để
+    kiểm tra nhanh, rồi convert sang LangChain Document.
     """
 
     dataset_records = load_dataset(dataset_path)
@@ -198,7 +257,23 @@ def build_chroma_index(
     device: str = "cpu",
     sample_size: int | None = None,
 ) -> Any:
-    """Build and persist a new Chroma index from clean QA documents."""
+    """
+    Build và persist Chroma index mới từ clean QA documents.
+
+    Biến đầu vào:
+    - dataset_path: raw JSON dataset.
+    - persist_directory: thư mục output Chroma, ví dụ `chroma_db`.
+    - collection_name: tên collection, ví dụ `langchain`.
+    - model_name/device: embedding model và thiết bị chạy.
+    - sample_size: dùng để build test index nhỏ.
+
+    Ví dụ output:
+    Một thư mục Chroma DB được tạo trên disk và object Chroma được trả về.
+
+    Cách tự viết lại:
+    Load clean documents, khởi tạo E5Embeddings, rồi gọi
+    `Chroma.from_documents(..., persist_directory=...)`.
+    """
 
     from langchain_chroma import Chroma
 
@@ -228,7 +303,16 @@ def load_chroma_index(
     model_name: str = DEFAULT_EMBED_MODEL,
     device: str = "cpu",
 ) -> Any:
-    """Load an existing Chroma index for preview/search."""
+    """
+    Load Chroma index đã tồn tại để search runtime.
+
+    Ví dụ output:
+    Chroma(persist_directory="D:/Ds107/chroma_db", collection_name="langchain")
+
+    Cách tự viết lại:
+    Khởi tạo cùng embedding function như lúc build index, rồi tạo object Chroma
+    trỏ vào persist_directory cũ.
+    """
 
     from langchain_chroma import Chroma
 
@@ -246,7 +330,18 @@ def load_chroma_index(
 # =============================================================================
 
 def preview_search(vectorstore: Any, query: str, top_k: int = 5) -> None:
-    """Print search results with the metadata needed for human inspection."""
+    """
+    In thử kết quả search để kiểm tra chất lượng index.
+
+    Ví dụ output:
+    RANK 1 | SCORE ...
+    topic: bánh tét
+    category: am_thuc
+
+    Cách tự viết lại:
+    Gọi `similarity_search_with_score()`, rồi in metadata quan trọng và một đoạn
+    page_content để con người kiểm tra retrieval có đúng không.
+    """
 
     results = vectorstore.similarity_search_with_score(query, k=top_k)
 
@@ -275,7 +370,15 @@ def preview_search(vectorstore: Any, query: str, top_k: int = 5) -> None:
 # =============================================================================
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments."""
+    """
+    Parse tham số CLI khi chạy file trực tiếp.
+
+    Ví dụ command:
+    python src/ingestion/build_chroma_index.py --dataset vietnamese_vqa_dataset.json
+
+    Cách tự viết lại:
+    Dùng argparse, mỗi tham số CLI nên map với một biến của build_chroma_index().
+    """
 
     parser = argparse.ArgumentParser(
         description="Build and preview a Chroma QA index."
@@ -327,7 +430,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Build a Chroma index and immediately preview retrieval results."""
+    """
+    Entry point CLI: build index rồi preview một query mẫu.
+
+    Ví dụ output:
+    In summary số chunks, thông tin persist directory, rồi top-k search results.
+
+    Cách tự viết lại:
+    Parse args, đổi sample_size=0 thành None, gọi build_chroma_index(), sau đó
+    gọi preview_search() để kiểm tra nhanh.
+    """
 
     args = parse_args()
     sample_size = None if args.sample_size == 0 else args.sample_size

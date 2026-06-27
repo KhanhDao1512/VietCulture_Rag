@@ -446,6 +446,34 @@ def inject_global_styles() -> None:
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
         }
 
+        .vc-hf-test {
+            position: relative;
+            z-index: 2;
+            display: grid;
+            grid-template-columns: 92px 1fr;
+            gap: 0.8rem;
+            align-items: center;
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background: rgba(255, 250, 241, 0.78);
+            border: 1px solid rgba(220, 167, 91, 0.16);
+            border-radius: 18px;
+        }
+
+        .vc-hf-test img {
+            width: 92px;
+            height: 72px;
+            object-fit: cover;
+            border-radius: 14px;
+        }
+
+        .vc-hf-test p {
+            margin: 0;
+            color: #4b5563;
+            font-size: 0.92rem;
+            line-height: 1.45;
+        }
+
         .vc-cards {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -462,8 +490,17 @@ def inject_global_styles() -> None:
             position: relative;
             border: 1px solid rgba(255,255,255,0.55);
             box-shadow: 0 18px 36px rgba(57, 43, 20, 0.16);
+            cursor: pointer;
+            text-decoration: none;
+            display: block;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
         }
-
+        
+        .vc-topic-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 22px 40px rgba(57, 43, 20, 0.25);
+        }
+        
         .vc-topic-card::before {
             content: "";
             position: absolute;
@@ -859,15 +896,19 @@ def build_topic_cards_html() -> str:
     for label, image_path in topics:
         image_url = build_hf_image_url_from_path(image_path)
         label_html = escape(label)
+        topic_param = quote(label)  # Mã hóa string để đưa lên URL an toàn
+
         style = (
             "background-image: "
             "linear-gradient(180deg, rgba(0,0,0,0.03), rgba(0,0,0,0.70)), "
             f"url('{image_url}');"
         )
+
+        # Đổi thành thẻ <a> truyền query param
         cards.append(
-            f'<div class="vc-topic-card" style="{style}">'
+            f'<a href="?topic={topic_param}" target="_self" class="vc-topic-card" style="{style}">'
             f'<div class="vc-topic-label">{label_html}</div>'
-            "</div>"
+            '</a>'
         )
     return '<div class="vc-cards">' + "".join(cards) + "</div>"
 
@@ -911,7 +952,7 @@ def render_welcome_screen() -> None:
                 st.session_state.started_chat = True
                 st.rerun()
         with link_col:
-            st.markdown('<div class="vc-secondary-link">Xem chủ đề</div>', unsafe_allow_html=True)
+            st.markdown('<div class="vc-secondary-link">Chọn chủ đề quan tâm</div>', unsafe_allow_html=True)
 
     with right_col:
         st.markdown(
@@ -925,8 +966,6 @@ def render_welcome_screen() -> None:
                     <img class="vc-assistant-avatar" src="{avatar_uri}" alt="VietCulture assistant">
                     <div class="vc-assistant-bubble">
                         Bánh bao là món ăn quen thuộc trong đời sống đô thị và gia đình Việt.
-                        Mình có thể giúp bạn tìm hiểu nguồn gốc, cách dùng, hoặc gợi ý chủ đề
-                        ẩm thực liên quan từ dataset.
                     </div>
                 </div>
                 <div class="vc-mini-input">Nhập câu hỏi của bạn...</div>
@@ -1057,6 +1096,11 @@ def render_chat_screen(bundle: Any) -> None:
     avatar_uri = image_to_data_uri(ASSISTANT_AVATAR)
     user_id, conversation_id, chat_history_key = render_sidebar(bundle)
 
+    # ---   Load memory để kiểm tra xem user đã có sở thích chưa ---
+    memory_db = load_memory_db(bundle.settings.memory_file)
+    current_memory = memory_db.get(user_id, {})
+    has_memory = bool(current_memory.get("categories") or current_memory.get("topics"))
+
     st.markdown(
         f"""
         <div class="vc-chat-topbar">
@@ -1076,6 +1120,13 @@ def render_chat_screen(bundle: Any) -> None:
     if chat_history_key not in st.session_state:
         st.session_state[chat_history_key] = []
 
+        # --- Tự động gửi tin nhắn mồi nếu là user mới ---
+        if not has_memory:
+            st.session_state[chat_history_key].append({
+                "role": "assistant",
+                "content": "Chào bạn! Có vẻ đây là lần đầu bạn trò chuyện với mình. Để mình có thể đưa ra các gợi ý văn hóa phù hợp nhất, bạn có hứng thú với lĩnh vực nào dưới đây?"
+            })
+
     for message in st.session_state[chat_history_key]:
         avatar = str(ASSISTANT_AVATAR) if message["role"] == "assistant" else None
         with st.chat_message(message["role"], avatar=avatar):
@@ -1084,12 +1135,32 @@ def render_chat_screen(bundle: Any) -> None:
             if recommendation_cards_html:
                 st.markdown(recommendation_cards_html, unsafe_allow_html=True)
 
-    prompt = st.chat_input("Nhập câu hỏi hoặc sở thích của bạn...")
+    user_input = st.chat_input("Nhập câu hỏi hoặc sở thích của bạn...")
+    quick_prompt = None
 
-    if prompt:
-        st.session_state[chat_history_key].append({"role": "user", "content": prompt})
+    # --- [THÊM MỚI]: Lấy prompt từ hình ảnh màn chào ---
+    if "welcome_quick_prompt" in st.session_state:
+        quick_prompt = st.session_state.welcome_quick_prompt
+        del st.session_state["welcome_quick_prompt"]
+
+    # --- [CẬP NHẬT 3]: Hiển thị các nút chọn nhanh (Onboarding) ---
+    # Thêm điều kiện 'not quick_prompt' để không bị đè UI khi vừa click từ ngoài vào
+    if not has_memory and not quick_prompt:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.caption("💡 Chọn nhanh một chủ đề để bắt đầu:")
+        cols = st.columns(4)
+        onboard_topics = ["Ẩm thực", "Lễ hội", "Kiến trúc", "Trang phục"]
+
+        for i, topic in enumerate(onboard_topics):
+            if cols[i].button(topic, use_container_width=True, key=f"coldstart_{topic}"):
+                quick_prompt = f"Tôi thích {topic.lower()}"
+
+    final_prompt = user_input or quick_prompt
+
+    if final_prompt:
+        st.session_state[chat_history_key].append({"role": "user", "content": final_prompt})
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(final_prompt)
 
         with st.chat_message("assistant", avatar=str(ASSISTANT_AVATAR)):
             with st.spinner("Agent đang xử lý..."):
@@ -1097,7 +1168,7 @@ def render_chat_screen(bundle: Any) -> None:
                     bundle=bundle,
                     user_id=user_id,
                     conversation_id=conversation_id,
-                    message=prompt,
+                    message=final_prompt,
                 )
             answer = state.get("answer", "")
             st.markdown(answer)
@@ -1118,6 +1189,10 @@ def render_chat_screen(bundle: Any) -> None:
             }
         )
         st.session_state.last_state = state
+
+        # --- [THÊM MỚI 4]: Rerun lại để làm mới UI (ẩn các nút bấm đi) ---
+        if quick_prompt:
+            st.rerun()
 
     st.divider()
     with st.expander("Prompt demo", expanded=False):
@@ -1154,6 +1229,13 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
     inject_global_styles()
+
+    if "topic" in st.query_params:
+        selected_topic = st.query_params["topic"]
+        st.session_state.started_chat = True
+        st.session_state.welcome_quick_prompt = f"Tôi thích {selected_topic.lower()}"
+        st.query_params.clear()  # Xóa URL param để giữ UI sạch sẽ
+
     if "started_chat" not in st.session_state:
         st.session_state.started_chat = False
 

@@ -188,19 +188,9 @@ Welcome screen dùng nhiều ảnh mẫu từ Hugging Face. Recommendation cards
 
 ## Chạy Evaluation
 
-Evaluation không gọi Gemini, chỉ test intent router và retrieval:
+Evaluation kiểm tra RAG pipeline (gọi Gemini sinh câu trả lời và dùng Ragas đánh giá):
 
-```powershell
-python src\evaluation\baseline_eval.py --persist-dir chroma_db --collection langchain --device cpu --top-k 5 --fetch-k 40
-```
-
-Kết quả kỳ vọng với index hiện tại:
-
-```text
-Intent:    5/5
-Retrieval: 4/4
-Total:     9/9
-```
+Chạy trực tiếp file `notebooks/benchmark.ipynb` để tiến hành đánh giá trên hệ thống.
 
 ## Quy Tắc Code Trong Project
 

@@ -1,5 +1,6 @@
 # Secrets
 .env
+.streamlit/secrets.toml
 
 # Python
 __pycache__/
@@ -17,14 +18,25 @@ __pycache__/
 # Local caches and model weights
 .cache/
 
-# Local Chroma indexes can be very large. Upload them separately if needed.
+# Local/experimental Chroma indexes. The selected demo index is tracked in vector_index/.
 chroma_db/
 chroma_db_qa_hybrid/
 chroma_db_qa_test/
+rebuild_outputs/
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3
+!vector_index/chroma.sqlite3
 
-# Large raw dataset. Keep the Hugging Face link in README instead of Git.
-vietnamese_vqa_dataset.json
-data/vietnamese_vqa_dataset.json
+# Downloaded data and generated local reports
+/data/
+/reports/
+/notebooks/
+/.agents/
+/Design/
+/assets/ai_avatar.png
+/assets/assistant_avatar.png
+/evaluation_outputs/
 
 # Local memory state
 user_memories.json

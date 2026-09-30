@@ -36,7 +36,7 @@ class AgentSettings:
     - collection_name: tên collection trong Chroma.
     - embed_model/device: model embedding dùng lúc query runtime.
     - top_k/fetch_k: số kết quả retrieval cuối/candidate ban đầu.
-    - google_api_key/gemini_model: cấu hình Gemini.
+    - llm_provider/base_url/api_key/model: cấu hình provider OpenAI-compatible hoặc Gemini.
     - use_llm_intent_router: bật/tắt LLM fallback cho intent mơ hồ.
     - llm_intent_confidence_threshold: rule confidence dưới ngưỡng này mới gọi LLM.
 
@@ -50,6 +50,7 @@ class AgentSettings:
 
     project_root: Path
     memory_file: Path
+    conversation_db: Path
     retriever_profile: str
     persist_dir: Path
     collection_name: str
@@ -60,8 +61,10 @@ class AgentSettings:
     lexical_weight: float
     retrieval_max_score: float | None
     max_retries: int
-    gemini_model: str
-    google_api_key: str | None
+    llm_provider: str
+    llm_base_url: str | None
+    llm_api_key: str | None
+    llm_model: str
     use_llm_intent_router: bool
     llm_intent_confidence_threshold: float
 
@@ -122,10 +125,24 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
 
     raw_max_score = os.getenv("QA_RETRIEVAL_MAX_SCORE", "").strip()
     use_llm_intent_router = os.getenv("USE_LLM_INTENT_ROUTER", "false").strip().lower()
+    llm_provider = os.getenv("LLM_PROVIDER", "vilao").strip().lower()
+    if llm_provider == "gemini":
+        llm_api_key = os.getenv("GOOGLE_API_KEY")
+        llm_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        llm_base_url = None
+    else:
+        llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("VILAO_API_KEY")
+        llm_model = os.getenv("LLM_MODEL", "chib/deepseek-v4.1-flash")
+        llm_base_url = os.getenv("LLM_BASE_URL", "https://api.vilao.ai/v1").strip()
+
+    conversation_db = Path(os.getenv("CONVERSATION_DB", "conversations.sqlite3"))
+    if not conversation_db.is_absolute():
+        conversation_db = root / conversation_db
 
     return AgentSettings(
         project_root=root,
         memory_file=Path(os.getenv("MEMORY_FILE", root / "user_memories.json")),
+        conversation_db=conversation_db,
         retriever_profile=retriever_profile,
         persist_dir=persist_dir,
         collection_name=collection_name,
@@ -136,8 +153,10 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
         lexical_weight=float(os.getenv("QA_LEXICAL_WEIGHT", "0.06")),
         retrieval_max_score=float(raw_max_score) if raw_max_score else None,
         max_retries=int(os.getenv("QA_MAX_RETRIES", "3")),
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
         use_llm_intent_router=use_llm_intent_router in {"1", "true", "yes", "on"},
         llm_intent_confidence_threshold=float(
             os.getenv("LLM_INTENT_CONFIDENCE_THRESHOLD", "0.75")

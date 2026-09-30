@@ -29,26 +29,47 @@ from functools import lru_cache
 from html import escape
 import json
 from pathlib import Path
-import re
+import uuid
 from typing import Any
 from urllib.parse import quote
 
 import streamlit as st
 
 from src.agent.graph import create_agent_bundle, invoke_agent
-from src.routing.routing import build_langgraph_config
+from src.memory.conversation_store import (
+    NEW_CONVERSATION_TITLE,
+    append_message,
+    create_conversation,
+    list_conversations,
+    load_messages,
+)
+from src.memory.store import DATASET_CATEGORY_LABELS
+from src.normalization.canonical_names import has_vietnamese_diacritics
+from src.routing.text_utils import normalize_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
-ASSISTANT_AVATAR = ASSETS_DIR / "assistant_avatar.png"
-DATASET_JSON_PATH = PROJECT_ROOT / "data" / "vietnamese_vqa_dataset.json"
+ASSISTANT_AVATAR = ASSETS_DIR / "an_avatar.svg"
 HF_BANH_BAO_IMAGE_URL = (
     "https://huggingface.co/datasets/Dangindev/viet-cultural-vqa/"
     "resolve/main/images/am_thuc/banh_bao/000001.jpg"
 )
 HF_DATASET_BASE_URL = "https://huggingface.co/datasets/Dangindev/viet-cultural-vqa/resolve/main"
-IMAGE_PATH_PATTERN = re.compile(r'"image_path"\s*:\s*"([^"]+)"')
+HOMEPAGE_TOPICS = [
+    ("Ẩm thực", "Hương vị ba miền", "images/am_thuc/banh_chung_Tet/000001.jpg"),
+    ("Kiến trúc", "Dấu ấn kiến trúc Việt", "images/kien_truc/nha_hat_Lớn_Ha_Noi/000001.jpg"),
+    ("Lễ hội", "Sắc màu lễ hội", "images/le_hoi/Vu_Lan_festival/000001.jpg"),
+    ("Phong cảnh", "Non nước Việt Nam", "images/phong_canh/sông_Hồng/000001.jpg"),
+    ("Trang phục", "Trang phục qua thời kỳ", "images/trang_phuc/ao_choang_lemur/000001.jpg"),
+    ("Đời sống hằng ngày", "Nếp sống thường ngày", "images/doi_song_hang_ngay/thu_hoạch_lúa/000001.jpg"),
+    ("Giao thông", "Giao thông xưa và nay", "images/giao_thong/xe_bò/000001.jpg"),
+    ("Thủ công mỹ nghệ", "Nghề thủ công truyền thống", "images/thu_cong_my_nghe/đan_lat/000001.jpg"),
+    ("Nhạc cụ", "Thanh âm dân tộc", "images/nhac_cu/musical_Vietnam/000001.png"),
+    ("Văn hóa dân gian", "Di sản văn hóa dân gian", "images/van_hoa_dan_gian/xẩm_singing/000001.jpg"),
+    ("Trò chơi dân gian", "Trò chơi và sinh hoạt cộng đồng", "images/tro_choi_dan_gian/wrestling_traditional/000001.jpg"),
+    ("Thể thao truyền thống", "Tinh thần thượng võ", "images/the_thao_truyen_thong/bóng_đa_phong_trao_Việt_Nam/000001.jpg"),
+]
 
 
 @st.cache_resource(show_spinner="Đang tải retriever và agent...")
@@ -86,7 +107,11 @@ def image_to_data_uri(image_path: Path) -> str:
     """
 
     suffix = image_path.suffix.lower()
-    mime_type = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
+    mime_type = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml",
+    }.get(suffix, "image/png")
     image_bytes = image_path.read_bytes()
     encoded_image = base64.b64encode(image_bytes).decode("ascii")
     return f"data:{mime_type};base64,{encoded_image}"
@@ -154,24 +179,6 @@ def reset_user_memory(memory_file: Path, user_id: str) -> None:
     memory_db = load_memory_db(memory_file)
     memory_db.pop(user_id, None)
     save_memory_db(memory_file, memory_db)
-
-
-def build_chat_history_key(user_id: str, conversation_id: str) -> str:
-    """
-    Tạo key riêng cho chat history trong st.session_state.
-
-    Biến đầu vào:
-    - user_id: định danh long-term memory.
-    - conversation_id: định danh cuộc trò chuyện hiện tại.
-
-    Ví dụ output:
-    "chat_history::demo_user_a::demo_thread"
-
-    Cách tự viết lại:
-    Ghép user_id và conversation_id để mỗi user/thread có lịch sử UI riêng.
-    """
-
-    return f"chat_history::{user_id}::{conversation_id}"
 
 
 def get_memory_summary(memory: dict[str, Any]) -> tuple[str, str]:
@@ -644,6 +651,103 @@ def inject_global_styles() -> None:
                 grid-template-columns: 1fr;
             }
         }
+
+        /* Tokens và component styles khớp với Design/01 và Design/02. */
+        :root {
+            --vc-green: #126044;
+            --vc-green-dark: #0d4d37;
+            --vc-cream: #f7f3e9;
+            --vc-cream-2: #ffffff;
+            --vc-ink: #173d32;
+            --vc-muted: #74877d;
+            --vc-border: rgba(18, 96, 68, 0.10);
+            --vc-shadow: 0 14px 36px rgba(24, 65, 49, 0.08);
+        }
+
+        .stApp { background: #f5f8f5; color: var(--vc-ink); }
+        .block-container { max-width: 1240px; padding-top: 1.4rem; padding-bottom: 2rem; }
+        .vc-header {
+            min-height: 76px; padding: 0.25rem 0 0.8rem; border-bottom: 1px solid #e9eeea;
+            align-items: center; overflow: visible; box-sizing: border-box;
+        }
+        .vc-brand { gap: 0.7rem; }
+        .vc-logo {
+            width: 44px; height: 44px; border-radius: 14px; background: var(--vc-green);
+            box-shadow: none; font-size: 1.35rem; line-height: 1; overflow: visible;
+        }
+        .vc-brand { flex-shrink: 0; }
+        .vc-brand h1 { color: var(--vc-green); font: 750 clamp(1.3rem, 2vw, 1.55rem)/1.2 "Segoe UI", Arial, sans-serif; letter-spacing: -0.025em; }
+        .vc-nav { gap: clamp(0.65rem, 1.5vw, 1.4rem); margin-left: auto; margin-right: 0.8rem; }
+        .vc-nav a { white-space: nowrap; }
+        .vc-nav a { color: #65776d; text-decoration: none; font-weight: 500; }
+        .vc-nav a.active { color: var(--vc-green); font-weight: 700; }
+        .vc-nav-cta, .vc-primary-link {
+            display: inline-flex; align-items: center; gap: 0.75rem; border-radius: 12px;
+            background: var(--vc-green); color: #fff !important; padding: 0.78rem 1.25rem;
+            min-height: 44px; box-sizing: border-box; white-space: nowrap;
+            font-weight: 700; line-height: 1.4; text-decoration: none !important; align-self: center;
+        }
+        .vc-home-hero {
+            display: grid; grid-template-columns: 1.08fr 0.92fr; align-items: center;
+            gap: 2rem; margin: 1.6rem 0 1.8rem; padding: 2rem;
+            border-radius: 24px; background: #e8f2eb;
+        }
+        .vc-home-copy { padding: 0.4rem 0.8rem; }
+        .vc-eyebrow { border: 0; background: transparent; color: var(--vc-green); padding: 0; margin-bottom: 1rem; font-size: 0.78rem; letter-spacing: 0.04em; }
+        .vc-home-copy h2 { margin: 0; color: #173d32; font: 750 clamp(2.4rem, 4.2vw, 3.35rem)/1.16 "Segoe UI", Arial, sans-serif; letter-spacing: -0.035em; }
+        .vc-home-copy p { max-width: 570px; color: var(--vc-muted); font-size: 1rem; line-height: 1.55; margin: 1rem 0 1.25rem; }
+        .vc-primary-link { padding: 0.72rem 1rem; }
+        .vc-welcome-card { display: flex; align-items: center; gap: 1.1rem; background: #fff; border-radius: 20px; padding: 1.4rem; min-height: 180px; }
+        .vc-welcome-card img { width: 96px; height: 112px; object-fit: cover; border-radius: 18px; }
+        .vc-welcome-card strong { color: var(--vc-green); font-size: 1.05rem; }
+        .vc-welcome-card p { color: var(--vc-muted); line-height: 1.5; margin: 0.45rem 0; }
+        .vc-welcome-card span { color: var(--vc-green); font-size: 0.9rem; }
+        .vc-section-heading { display: flex; align-items: center; justify-content: space-between; margin: 0.7rem 0 0.5rem; }
+        .vc-section-heading h2 { margin: 0; font: 750 1.65rem/1.25 "Segoe UI", Arial, sans-serif; letter-spacing: -0.02em; color: #173d32; }
+        .vc-section-heading p { margin: 0.3rem 0 0; color: var(--vc-muted); font-size: 0.9rem; }
+        .vc-section-heading > span { color: var(--vc-green); font-size: 0.82rem; }
+        .vc-cards { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
+        .vc-topic-card { min-height: 0; background: white; border: 0; border-radius: 16px; box-shadow: none; color: var(--vc-ink); text-decoration: none !important; }
+        .vc-topic-card::before { display: none; }
+        .vc-topic-card img { display: block; width: 100%; height: 132px; object-fit: cover; background: #e8f2eb; }
+        .vc-topic-card-copy { display: flex; flex-direction: column; gap: 0.35rem; padding: 0.8rem 0.9rem 0.9rem; }
+        .vc-topic-card-copy strong { color: var(--vc-ink); font-size: 1.02rem; text-decoration: none; }
+        .vc-topic-card-copy span { color: var(--vc-muted); font-size: 0.8rem; }
+        .vc-topic-card:hover { transform: translateY(-3px); box-shadow: var(--vc-shadow); }
+        .vc-footer { color: var(--vc-muted); border-top: 1px solid #e9eeea; margin-top: 1.2rem; font-size: 0.82rem; }
+        .vc-chat-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 1.5rem; }
+        .vc-topic-nav-title { color: var(--vc-green); font-weight: 700; margin: 0.4rem 0 0.8rem; }
+        .vc-chat-topbar { background: #fff; border: 0; border-radius: 0; box-shadow: none; border-bottom: 1px solid #edf0ed; margin: -0.5rem -0.5rem 1rem; padding: 0.9rem 1.2rem; }
+        .vc-chat-title h2 { color: var(--vc-green); }
+        .vc-chat-title img { border-radius: 50%; }
+        [data-testid="stChatMessage"] { border-radius: 16px; }
+        [data-testid="stChatInput"] { border: 1px solid #bcd5c5; border-radius: 18px; background: #dcebe1; box-shadow: 0 8px 24px rgba(24,65,49,0.10); }
+        [data-testid="stChatInput"] textarea { color: var(--vc-ink); font-size: 1.08rem; line-height: 1.55; }
+        [data-testid="stChatMessage"] { font-size: 1.08rem; line-height: 1.7; }
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p { font-size: 1.08rem; line-height: 1.7; }
+        [data-testid="stChatMessage"]:has(img[alt="An"]) [data-testid="stMarkdownContainer"] { background: #fff; border: 1px solid #edf0ed; border-radius: 16px; padding: 0.75rem 1rem; }
+        .vc-user-message { width: fit-content; max-width: min(86%, 760px); margin-left: auto; background: #e0eee5; border: 1px solid #d3e5d9; border-radius: 18px; padding: 0.85rem 1.1rem; color: #173d32; font-size: 1.08rem; line-height: 1.65; overflow-wrap: anywhere; }
+        div[data-testid="stButton"] > button { background: #fff; border: 0; color: var(--vc-green); box-shadow: none; text-align: left; min-height: 2.7rem; }
+        div[data-testid="stButton"] > button:hover { background: #e8f2eb; color: var(--vc-green-dark); border: 0; }
+        [data-testid="stSidebar"] { background: #fff; }
+        .vc-chat-note { background: #eff6f0; border-radius: 14px; padding: 0.85rem; color: var(--vc-muted); font-size: 0.8rem; line-height: 1.45; }
+        @media (max-width: 900px) {
+            .vc-home-hero { grid-template-columns: 1fr; padding: 1.25rem; }
+            .vc-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .vc-nav { display: none; }
+        }
+        @media (max-width: 620px) {
+            .vc-cards { grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+            .vc-topic-card img { height: 96px; }
+        }
+        @media (max-width: 760px) {
+            .vc-header { gap: 0.6rem; }
+            .vc-brand h1 { font-size: 1.2rem; }
+            .vc-nav-cta { min-height: 40px; padding: 0.55rem 0.75rem; }
+            .vc-home-copy h2 { font-size: 2.15rem; }
+            .vc-section-heading h2 { font-size: 1.4rem; }
+            .vc-user-message { max-width: 94%; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -670,42 +774,6 @@ def build_hf_image_url_from_path(image_path: str) -> str:
         clean_path = clean_path[len("data/"):]
     encoded_path = "/".join(quote(part, safe="") for part in clean_path.split("/"))
     return f"{HF_DATASET_BASE_URL}/{encoded_path}"
-
-
-@lru_cache(maxsize=1)
-def load_dataset_image_path_index() -> dict[str, str]:
-    """
-    Tạo index image_path từ JSON dataset để biết đúng extension ảnh.
-
-    Biến đầu vào:
-    - Không có input trực tiếp, hàm đọc `data/vietnamese_vqa_dataset.json`.
-
-    Ví dụ output:
-    {"kien_truc|nha_truyen_thống_mien_Tây|000039": "data/images/.../000039.png"}
-
-    Cách tự viết lại:
-    Đọc file theo từng dòng, chỉ bắt dòng có `image_path`, tách category/folder/số ảnh,
-    rồi cache dict bằng lru_cache để không scan lại ở mỗi lần recommendation.
-    """
-
-    image_index: dict[str, str] = {}
-    if not DATASET_JSON_PATH.exists():
-        return image_index
-
-    with DATASET_JSON_PATH.open("r", encoding="utf-8") as dataset_file:
-        for line in dataset_file:
-            match = IMAGE_PATH_PATTERN.search(line)
-            if not match:
-                continue
-            image_path = match.group(1).replace("\\", "/")
-            path_parts = image_path.split("/")
-            if len(path_parts) < 5:
-                continue
-            category = path_parts[-3]
-            keyword_folder = path_parts[-2]
-            image_number = path_parts[-1].rsplit(".", 1)[0]
-            image_index[f"{category}|{keyword_folder}|{image_number}"] = image_path
-    return image_index
 
 
 def build_hf_image_url_from_metadata(metadata: dict[str, Any]) -> str:
@@ -741,12 +809,8 @@ def build_hf_image_url_from_metadata(metadata: dict[str, Any]) -> str:
         image_number = image_number.zfill(6)
 
     keyword_folder = "_".join(keyword.split())
-    indexed_image_path = load_dataset_image_path_index().get(
-        f"{category}|{keyword_folder}|{image_number}"
-    )
-    if indexed_image_path:
-        return build_hf_image_url_from_path(indexed_image_path)
-
+    # Runtime không đọc raw dataset chỉ để tìm extension. Các index mới đã lưu
+    # image_path trong metadata; index legacy dùng fallback theo category.
     extension = ".png" if category == "nhac_cu" and "musical" in keyword_folder else ".jpg"
     image_path = f"images/{category}/{keyword_folder}/{image_number}{extension}"
     return build_hf_image_url_from_path(image_path)
@@ -767,7 +831,8 @@ def safe_display_topic(metadata: dict[str, Any]) -> str:
     """
 
     return str(
-        metadata.get("canonical_topic")
+        metadata.get("display_topic")
+        or metadata.get("canonical_topic")
         or metadata.get("topic")
         or metadata.get("keyword")
         or metadata.get("category")
@@ -797,19 +862,22 @@ def build_recommendation_cards_html(documents: list[Any]) -> str:
     seen_keys: set[str] = set()
     for document in documents:
         metadata = getattr(document, "metadata", {}) or {}
+        if "display_topic" in metadata and not metadata.get("display_topic"):
+            continue
         topic = safe_display_topic(metadata)
-        image_id = str(metadata.get("image_id", ""))
         category = str(metadata.get("category", ""))
-        dedup_key = f"{category}:{topic}:{image_id}"
+        if not has_vietnamese_diacritics(topic):
+            continue
+        dedup_key = f"{category}:{normalize_text(topic)}"
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
 
         image_url = build_hf_image_url_from_metadata(metadata)
         question_type = str(metadata.get("question_type", "") or "recommendation")
-        keyword = str(metadata.get("keyword", "") or topic)
+        keyword = topic
         topic_html = escape(topic)
-        category_html = escape(category or "văn hóa")
+        category_html = escape(DATASET_CATEGORY_LABELS.get(category, category or "văn hóa"))
         keyword_html = escape(keyword)
         question_type_html = escape(question_type)
         cards.append(
@@ -829,12 +897,12 @@ def build_recommendation_cards_html(documents: list[Any]) -> str:
     return '<div class="vc-rec-grid">' + "".join(cards) + "</div>"
 
 
-def render_header(show_chat_button: bool = True) -> None:
+def render_header(active_page: str = "home") -> None:
     """
     Render header thương hiệu VietCulture.
 
     Biến đầu vào:
-    - show_chat_button: nếu True thì hiển thị nút bắt đầu ở góc phải.
+    - active_page: màn hiện tại để đánh dấu điều hướng.
 
     Ví dụ output:
     Header có logo, tên VietCulture, nav nhỏ và optional CTA.
@@ -844,22 +912,24 @@ def render_header(show_chat_button: bool = True) -> None:
     khi cần tương tác thật.
     """
 
-    right_button = (
-        '<div class="vc-nav"><span>Trang chủ</span><span>Giới thiệu</span><span>Chủ đề</span></div>'
-        if not show_chat_button
-        else '<div class="vc-nav"><span>Trang chủ</span><span>Giới thiệu</span><span>Chủ đề</span></div>'
+    nav_items = [
+        ("home", "Trang chủ", "?home=true"),
+        ("topics", "Chủ đề", "#topics"),
+        ("about", "Giới thiệu", "#about"),
+    ]
+    nav_links = "".join(
+        f'<a class="{"active" if key == active_page else ""}" href="{href}">{label}</a>'
+        for key, label, href in nav_items
     )
     st.markdown(
         f"""
         <div class="vc-header">
             <div class="vc-brand">
-                <div class="vc-logo">VC</div>
-                <div>
-                    <h1>VietCulture</h1>
-                    <p>Chatbot văn hóa Việt Nam</p>
-                </div>
+                <div class="vc-logo">V</div>
+                <h1>VietCulture</h1>
             </div>
-            {right_button}
+            <nav class="vc-nav">{nav_links}</nav>
+            <a class="vc-nav-cta" href="?start_chat=true">Trò chuyện</a>
         </div>
         """,
         unsafe_allow_html=True,
@@ -881,34 +951,19 @@ def build_topic_cards_html() -> str:
     thành HTML string.
     """
 
-    topics = [
-        ("Ẩm thực", "images/am_thuc/banh_bao/000001.jpg"),
-        ("Bánh chưng", "images/am_thuc/banh_chung_Tet/000001.jpg"),
-        ("Lễ hội", "images/le_hoi/Vu_Lan_festival/000001.jpg"),
-        ("Trang phục", "images/trang_phuc/ao_choang_lemur/000001.jpg"),
-        ("Kiến trúc", "images/kien_truc/nha_hat_Lớn_Ha_Noi/000001.jpg"),
-        ("Nhạc cụ", "images/nhac_cu/musical_Vietnam/000001.png"),
-        ("Làng nghề", "images/thu_cong_my_nghe/đan_lat/000001.jpg"),
-        ("Thể thao", "images/the_thao_truyen_thong/bóng_đa_phong_trao_Việt_Nam/000001.jpg"),
-    ]
-
     cards: list[str] = []
-    for label, image_path in topics:
+    for label, description, image_path in HOMEPAGE_TOPICS:
         image_url = build_hf_image_url_from_path(image_path)
         label_html = escape(label)
         topic_param = quote(label)  # Mã hóa string để đưa lên URL an toàn
 
-        style = (
-            "background-image: "
-            "linear-gradient(180deg, rgba(0,0,0,0.03), rgba(0,0,0,0.70)), "
-            f"url('{image_url}');"
-        )
-
         # Đổi thành thẻ <a> truyền query param
+        description_html = escape(description)
         cards.append(
-            f'<a href="?topic={topic_param}" target="_self" class="vc-topic-card" style="{style}">'
-            f'<div class="vc-topic-label">{label_html}</div>'
-            '</a>'
+            f'<a href="?topic={topic_param}" target="_self" class="vc-topic-card">'
+            f'<img src="{image_url}" alt="{label_html}" loading="lazy">'
+            f'<div class="vc-topic-card-copy"><strong>{label_html}</strong>'
+            f'<span>{description_html} &nbsp;→</span></div></a>'
         )
     return '<div class="vc-cards">' + "".join(cards) + "</div>"
 
@@ -930,53 +985,34 @@ def render_welcome_screen() -> None:
     """
 
     avatar_uri = image_to_data_uri(ASSISTANT_AVATAR)
-    render_header(show_chat_button=False)
-
-    left_col, right_col = st.columns([1.05, 0.95], gap="large")
-
-    with left_col:
-        st.markdown(
-            """
-            <div class="vc-eyebrow">Hiểu văn hóa Việt, kết nối giá trị Việt</div>
-            <h2 class="vc-title">Khám phá<br><span class="green">văn hóa Việt Nam</span><br>qua trò chuyện</h2>
-            <p class="vc-copy">
-                Hỏi bất cứ điều gì về ẩm thực, lễ hội, trang phục, kiến trúc,
-                nhạc cụ và đời sống văn hóa Việt Nam.
-            </p>
-            """,
-            unsafe_allow_html=True,
-        )
-        action_col, link_col = st.columns([0.46, 0.54], vertical_alignment="center")
-        with action_col:
-            if st.button("Bắt đầu trò chuyện", key="welcome_start", use_container_width=True):
-                st.session_state.started_chat = True
-                st.rerun()
-        with link_col:
-            st.markdown('<div class="vc-secondary-link">Chọn chủ đề quan tâm</div>', unsafe_allow_html=True)
-
-    with right_col:
-        st.markdown(
-            f"""
-            <div class="vc-chat-preview">
-                <div class="vc-user-bubble">
-                    Bánh bao có ý nghĩa gì trong văn hóa ẩm thực Việt?
-                    <div style="text-align:right;color:#60705f;font-size:0.82rem;margin-top:0.7rem;">10:24</div>
-                </div>
-                <div class="vc-assistant-row">
-                    <img class="vc-assistant-avatar" src="{avatar_uri}" alt="VietCulture assistant">
-                    <div class="vc-assistant-bubble">
-                        Bánh bao là món ăn quen thuộc trong đời sống đô thị và gia đình Việt.
-                    </div>
-                </div>
-                <div class="vc-mini-input">Nhập câu hỏi của bạn...</div>
+    render_header(active_page="home")
+    st.markdown(
+        f"""
+        <section class="vc-home-hero">
+          <div class="vc-home-copy">
+            <div class="vc-eyebrow">HIỂU VĂN HÓA VIỆT · KẾT NỐI GIÁ TRỊ VIỆT</div>
+            <h2>Mỗi câu hỏi,<br>một nét đẹp Việt Nam.</h2>
+            <p>Cùng khám phá những câu chuyện về ẩm thực, con người và di sản Việt Nam qua cuộc trò chuyện với An.</p>
+            <a class="vc-primary-link" href="?start_chat=true">Bắt đầu trò chuyện <span>→</span></a>
+          </div>
+          <div class="vc-welcome-card">
+            <img src="{avatar_uri}" alt="An, trợ lý văn hóa Việt Nam">
+            <div><strong>Xin chào, mình là An!</strong>
+              <p>Người bạn đồng hành cùng bạn tìm hiểu văn hóa Việt.</p>
+              <span>Bạn muốn khám phá điều gì?</span>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
+          </div>
+        </section>
+        <section class="vc-topic-section" id="topics">
+          <div class="vc-section-heading"><div><h2>Hôm nay, bạn muốn khám phá gì?</h2>
+          <p>Chọn một chủ đề để bắt đầu trò chuyện cùng An.</p></div><span>{len(HOMEPAGE_TOPICS)} chủ đề văn hóa</span></div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
     st.markdown(build_topic_cards_html(), unsafe_allow_html=True)
     st.markdown(
-        '<div class="vc-footer">VietCulture - Tôn vinh và lan tỏa giá trị văn hóa Việt</div>',
+        '<div class="vc-footer">VietCulture · Văn hóa gần hơn qua mỗi cuộc trò chuyện</div>',
         unsafe_allow_html=True,
     )
 
@@ -1005,207 +1041,200 @@ def render_debug_state(state: dict[str, Any]) -> None:
         st.write("Memory update allowed:", state.get("memory_update_allowed"))
         st.write("Route reason:", state.get("route_reason"))
         st.write("Transformed question:", state.get("transformed_question"))
+        st.write("Tên chuẩn hóa:", state.get("canonical_names", []))
         st.write("Retrieved documents:", len(state.get("documents", [])))
+        for index, document in enumerate(state.get("documents", []), start=1):
+            metadata = getattr(document, "metadata", {}) or {}
+            with st.expander(
+                f"Tài liệu {index}: "
+                f"{metadata.get('canonical_topic') or metadata.get('topic') or metadata.get('keyword', 'không tên')}"
+            ):
+                st.write("Category:", metadata.get("category"))
+                st.write("Question type:", metadata.get("question_type"))
+                st.write("Image path:", metadata.get("image_path"))
+                st.code(getattr(document, "page_content", ""))
         st.code(state.get("user_preferences", "{}"), language="json")
 
 
-def render_sidebar(bundle: Any) -> tuple[str, str, str]:
-    """
-    Render sidebar của màn chat và trả về user/thread key.
-
-    Biến đầu vào:
-    - bundle: AgentBundle chứa settings và LLM status.
-
-    Ví dụ output:
-    ("demo_user_a", "demo_thread", "chat_history::demo_user_a::demo_thread")
-
-    Cách tự viết lại:
-    Đặt input user_id/conversation_id trong sidebar, tạo chat_history_key, hiển
-    thị memory hiện tại và các nút reset/clear.
-    """
+def render_sidebar(bundle: Any) -> tuple[str, str]:
+    """Render lịch sử hội thoại và memory trong sidebar native của Streamlit."""
 
     settings = bundle.settings
     with st.sidebar:
-        st.subheader("Hồ sơ người dùng")
-        user_id = st.text_input("User ID", value="demo_user_a")
-        conversation_id = st.text_input("Conversation", value="demo_thread")
-        thread_id = build_langgraph_config(user_id, conversation_id)["configurable"]["thread_id"]
-        st.caption(f"Thread: `{thread_id}`")
+        st.markdown("### VietCulture")
+        user_id = st.text_input("User ID", value="demo_user_a", key="vc_user_id").strip()
+        user_id = user_id or "anonymous"
+        memory_db = load_memory_db(settings.memory_file)
+        current_memory = memory_db.get(user_id, {})
+        conversations = list_conversations(settings.conversation_db, user_id)
 
-        chat_history_key = build_chat_history_key(user_id, conversation_id)
+        if not conversations:
+            conversation_id = f"chat_{uuid.uuid4().hex[:10]}"
+            create_conversation(settings.conversation_db, user_id, conversation_id)
+            if not (current_memory.get("categories") or current_memory.get("topics")):
+                append_message(
+                    settings.conversation_db,
+                    user_id,
+                    conversation_id,
+                    "assistant",
+                    "Chào bạn! Có vẻ đây là lần đầu bạn trò chuyện với mình. "
+                    "Bạn hứng thú với lĩnh vực văn hóa nào?",
+                )
+            conversations = list_conversations(settings.conversation_db, user_id)
 
-        col_a, col_b = st.columns(2)
-        if col_a.button("Reset memory", use_container_width=True):
-            reset_user_memory(settings.memory_file, user_id)
-            st.session_state.pop(chat_history_key, None)
-            st.session_state.pop("last_state", None)
-            st.success(f"Đã reset memory cho {user_id}")
-        if col_b.button("Clear chat", use_container_width=True):
-            st.session_state.pop(chat_history_key, None)
-            st.success("Đã xóa chat hiện tại")
+        conversation_ids = [item["conversation_id"] for item in conversations]
+        if st.session_state.get("vc_active_user") != user_id:
+            st.session_state["vc_active_user"] = user_id
+            st.session_state["vc_active_conversation"] = conversation_ids[0]
+        elif st.session_state.get("vc_active_conversation") not in conversation_ids:
+            st.session_state["vc_active_conversation"] = conversation_ids[0]
+
+        if st.button("＋ Cuộc trò chuyện mới", key="vc_new_conversation", use_container_width=True):
+            conversation_id = f"chat_{uuid.uuid4().hex[:10]}"
+            create_conversation(settings.conversation_db, user_id, conversation_id)
+            if not (current_memory.get("categories") or current_memory.get("topics")):
+                append_message(
+                    settings.conversation_db,
+                    user_id,
+                    conversation_id,
+                    "assistant",
+                    "Chào bạn! Có vẻ đây là lần đầu bạn trò chuyện với mình. "
+                    "Bạn hứng thú với lĩnh vực văn hóa nào?",
+                )
+            st.session_state["vc_active_user"] = user_id
+            st.session_state["vc_active_conversation"] = conversation_id
+            st.rerun()
+
+        title_by_id = {item["conversation_id"]: item["title"] for item in conversations}
+        # Hội thoại vừa tạo có thể chưa nằm trong snapshot trước khi rerun.
+        selected_id = st.radio(
+            "Lịch sử trò chuyện",
+            options=conversation_ids,
+            key="vc_active_conversation",
+            format_func=lambda item: title_by_id.get(item, NEW_CONVERSATION_TITLE),
+            label_visibility="collapsed",
+        )
 
         st.markdown("---")
+        st.caption(f"User đang xem: `{user_id}`")
         if bundle.llm_generate:
-            st.markdown('<span class="status-pill">Gemini ready</span>', unsafe_allow_html=True)
+            provider_label = f"{settings.llm_provider} · {settings.llm_model}"
+            st.markdown(f'<span class="status-pill">{escape(provider_label)}</span>', unsafe_allow_html=True)
         else:
             st.markdown(
-                '<span class="status-pill status-pill-warning">Gemini missing</span>',
+                '<span class="status-pill status-pill-warning">LLM chưa cấu hình</span>',
                 unsafe_allow_html=True,
             )
         router_status = "Hybrid LLM router" if settings.use_llm_intent_router else "Rule router"
         st.caption(f"Router: {router_status}")
         st.caption(f"Chroma: `{settings.persist_dir.name}` / `{settings.collection_name}`")
-        st.markdown(
-            '<div class="sidebar-note">Long-term memory theo User ID. '
-            'Chat display theo User ID + Conversation.</div>',
-            unsafe_allow_html=True,
-        )
 
         st.markdown("---")
-        st.subheader("Memory đã lưu")
-        memory_db = load_memory_db(settings.memory_file)
-        current_memory = memory_db.get(user_id, {})
+        st.subheader("Memory")
         interest_text, evidence_text = get_memory_summary(current_memory)
         st.write("Sở thích:", interest_text)
         st.caption(f"Evidence: {evidence_text}")
         with st.expander("Memory JSON", expanded=False):
             st.json(current_memory or {})
-
-        if st.button("Quay lại màn chào", use_container_width=True):
-            st.session_state.started_chat = False
+        if st.button("Reset memory", key="vc_reset_memory", use_container_width=True):
+            reset_user_memory(settings.memory_file, user_id)
             st.rerun()
 
-    return user_id, conversation_id, chat_history_key
+    return user_id, selected_id
+
+
+def _render_chat_message(message: dict[str, Any]) -> None:
+    """Vẽ user/assistant với bề mặt màu riêng và transcript SQLite."""
+
+    if message["role"] == "user":
+        safe_text = escape(str(message["content"])).replace("\n", "<br>")
+        st.markdown(f'<div class="vc-user-message">{safe_text}</div>', unsafe_allow_html=True)
+        return
+
+    with st.chat_message("assistant", avatar=str(ASSISTANT_AVATAR)):
+        st.markdown(message["content"])
+        recommendation_cards_html = message.get("recommendation_cards_html") or ""
+        if recommendation_cards_html:
+            st.markdown(recommendation_cards_html, unsafe_allow_html=True)
 
 
 def render_chat_screen(bundle: Any) -> None:
-    """
-    Render màn chat chính.
+    """Vẽ transcript từ SQLite và giữ chat input ở cuối vùng nội dung chính."""
 
-    Biến đầu vào:
-    - bundle: AgentBundle đã load một lần.
+    user_id, conversation_id = render_sidebar(bundle)
+    current_memory = load_memory_db(bundle.settings.memory_file).get(user_id, {})
+    messages = load_messages(bundle.settings.conversation_db, user_id, conversation_id)
 
-    Ví dụ output:
-    UI chat có topbar, sidebar memory, lịch sử chat và input prompt.
-
-    Cách tự viết lại:
-    Render sidebar để lấy user/thread, replay chat history từ session_state, rồi
-    khi có prompt thì gọi invoke_agent() và append answer vào lịch sử.
-    """
-
-    avatar_uri = image_to_data_uri(ASSISTANT_AVATAR)
-    user_id, conversation_id, chat_history_key = render_sidebar(bundle)
-
-    # ---   Load memory để kiểm tra xem user đã có sở thích chưa ---
-    memory_db = load_memory_db(bundle.settings.memory_file)
-    current_memory = memory_db.get(user_id, {})
-    has_memory = bool(current_memory.get("categories") or current_memory.get("topics"))
-
+    render_header(active_page="chat")
     st.markdown(
-        f"""
-        <div class="vc-chat-topbar">
-            <div class="vc-chat-title">
-                <img src="{avatar_uri}" alt="Assistant avatar">
-                <div>
-                    <h2>VietCulture Assistant</h2>
-                    <p>Hỏi đáp văn hóa Việt Nam có RAG, memory và recommendation.</p>
-                </div>
-            </div>
-            <span class="status-pill">Đang trò chuyện</span>
-        </div>
-        """,
+        '<div class="vc-chat-topbar"><div class="vc-chat-title">'
+        '<img src="' + image_to_data_uri(ASSISTANT_AVATAR) + '" alt="An">'
+        '<div><h2>An · Hướng dẫn văn hóa</h2>'
+        '<p>Cùng khám phá những câu chuyện văn hóa Việt Nam</p></div></div>'
+        '<span class="status-pill">● Sẵn sàng trò chuyện</span></div>',
         unsafe_allow_html=True,
     )
 
-    if chat_history_key not in st.session_state:
-        st.session_state[chat_history_key] = []
+    last_state = st.session_state.get(f"last_state::{user_id}::{conversation_id}")
+    for index, message in enumerate(messages):
+        _render_chat_message(message)
+        if index == len(messages) - 1 and message["role"] == "assistant" and last_state:
+            render_debug_state(last_state)
 
-        # --- Tự động gửi tin nhắn mồi nếu là user mới ---
+    has_memory = bool(current_memory.get("categories") or current_memory.get("topics"))
+    if not messages or (len(messages) == 1 and messages[0]["role"] == "assistant"):
+        st.markdown('<div class="vc-chat-note"><strong>Cứ hỏi điều bạn tò mò</strong><br>'
+                    'An sẽ cùng bạn tìm hiểu từng câu chuyện văn hóa.</div>',
+                    unsafe_allow_html=True)
         if not has_memory:
-            st.session_state[chat_history_key].append({
-                "role": "assistant",
-                "content": "Chào bạn! Có vẻ đây là lần đầu bạn trò chuyện với mình. Để mình có thể đưa ra các gợi ý văn hóa phù hợp nhất, bạn có hứng thú với lĩnh vực nào dưới đây?"
-            })
+            starter_columns = st.columns(4)
+            for index, topic in enumerate(["Ẩm thực", "Lễ hội", "Kiến trúc", "Trang phục"]):
+                if starter_columns[index].button(topic, key=f"vc_coldstart_{topic}"):
+                    st.session_state["pending_prompt"] = f"Tôi quan tâm đến {topic.lower()}"
+                    st.rerun()
 
-    for message in st.session_state[chat_history_key]:
-        avatar = str(ASSISTANT_AVATAR) if message["role"] == "assistant" else None
-        with st.chat_message(message["role"], avatar=avatar):
-            st.markdown(message["content"])
-            recommendation_cards_html = message.get("recommendation_cards_html")
-            if recommendation_cards_html:
-                st.markdown(recommendation_cards_html, unsafe_allow_html=True)
-
-    user_input = st.chat_input("Nhập câu hỏi hoặc sở thích của bạn...")
-    quick_prompt = None
-
-    # --- [THÊM MỚI]: Lấy prompt từ hình ảnh màn chào ---
-    if "welcome_quick_prompt" in st.session_state:
-        quick_prompt = st.session_state.welcome_quick_prompt
-        del st.session_state["welcome_quick_prompt"]
-
-    # --- [CẬP NHẬT 3]: Hiển thị các nút chọn nhanh (Onboarding) ---
-    # Thêm điều kiện 'not quick_prompt' để không bị đè UI khi vừa click từ ngoài vào
-    if not has_memory and not quick_prompt:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.caption("💡 Chọn nhanh một chủ đề để bắt đầu:")
-        cols = st.columns(4)
-        onboard_topics = ["Ẩm thực", "Lễ hội", "Kiến trúc", "Trang phục"]
-
-        for i, topic in enumerate(onboard_topics):
-            if cols[i].button(topic, use_container_width=True, key=f"coldstart_{topic}"):
-                quick_prompt = f"Tôi thích {topic.lower()}"
-
-    final_prompt = user_input or quick_prompt
-
+    pending_prompt = st.session_state.pop("pending_prompt", None)
+    if not pending_prompt:
+        pending_prompt = st.session_state.pop("welcome_quick_prompt", None)
+    user_input = st.chat_input("Bạn muốn tìm hiểu điều gì về văn hóa Việt?")
+    final_prompt = user_input or pending_prompt
     if final_prompt:
-        st.session_state[chat_history_key].append({"role": "user", "content": final_prompt})
+        append_message(
+            bundle.settings.conversation_db, user_id, conversation_id, "user", final_prompt
+        )
         with st.chat_message("user"):
-            st.markdown(final_prompt)
+            safe_text = escape(final_prompt).replace("\n", "<br>")
+            st.markdown(f'<div class="vc-user-message">{safe_text}</div>', unsafe_allow_html=True)
 
         with st.chat_message("assistant", avatar=str(ASSISTANT_AVATAR)):
-            with st.spinner("Agent đang xử lý..."):
+            with st.spinner("An đang tìm câu trả lời..."):
                 state = invoke_agent(
                     bundle=bundle,
                     user_id=user_id,
                     conversation_id=conversation_id,
                     message=final_prompt,
+                    history=messages,
                 )
             answer = state.get("answer", "")
             st.markdown(answer)
             recommendation_cards_html = ""
             if state.get("intent") == "recommendation_request":
-                recommendation_cards_html = build_recommendation_cards_html(
-                    state.get("documents", [])
-                )
+                recommendation_cards_html = build_recommendation_cards_html(state.get("documents", []))
                 if recommendation_cards_html:
                     st.markdown(recommendation_cards_html, unsafe_allow_html=True)
-            render_debug_state(state)
 
-        st.session_state[chat_history_key].append(
-            {
-                "role": "assistant",
-                "content": answer,
-                "recommendation_cards_html": recommendation_cards_html,
-            }
+        append_message(
+            bundle.settings.conversation_db,
+            user_id,
+            conversation_id,
+            "assistant",
+            answer,
+            recommendation_cards_html,
         )
-        st.session_state.last_state = state
+        st.session_state[f"last_state::{user_id}::{conversation_id}"] = state
+        st.rerun()
 
-        # --- [THÊM MỚI 4]: Rerun lại để làm mới UI (ẩn các nút bấm đi) ---
-        if quick_prompt:
-            st.rerun()
-
-    st.divider()
-    with st.expander("Prompt demo", expanded=False):
-        st.code(
-            "\n".join(
-                [
-                    "Tôi thích lễ hội và ẩm thực",
-                    "Tôi thích gì?",
-                    "Gợi ý cho tôi vài chủ đề phù hợp",
-                    "Xe máy là gì?",
-                ]
-            )
-        )
+    st.caption("An có thể nhầm lẫn. Hãy kiểm chứng thông tin quan trọng.")
 
 
 def main() -> None:
@@ -1229,6 +1258,14 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
     inject_global_styles()
+
+    if "home" in st.query_params:
+        st.session_state.started_chat = False
+        st.query_params.clear()
+        st.rerun()
+    if "start_chat" in st.query_params:
+        st.session_state.started_chat = True
+        st.query_params.clear()
 
     if "topic" in st.query_params:
         selected_topic = st.query_params["topic"]

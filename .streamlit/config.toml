@@ -1,9 +1,15 @@
 [theme]
 base = "light"
-primaryColor = "#2563eb"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f8fafc"
-textColor = "#0f172a"
+primaryColor = "#126044"
+backgroundColor = "#f5f8f5"
+secondaryBackgroundColor = "#e8f2eb"
+textColor = "#173d32"
 
 [server]
 headless = true
+# Transformers lazy imports break Streamlit's module watcher in this environment.
+# Reload the browser or restart Streamlit after editing Python files.
+fileWatcherType = "none"
+
+[client]
+toolbarMode = "minimal"

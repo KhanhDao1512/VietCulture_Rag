@@ -42,6 +42,8 @@ def normalize_text(text: Any) -> str:
         for character in decomposed_text
         if unicodedata.category(character) != "Mn"
     )
+    # Chữ đ/Đ không tách thành d + dấu khi normalize Unicode NFD.
+    accentless_text = accentless_text.replace("đ", "d")
     return re.sub(r"[^a-z0-9]+", " ", accentless_text).strip()
 
 

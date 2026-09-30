@@ -340,6 +340,33 @@ def score_lexical_match(query: str, document: Any) -> float:
     return token_overlap_score + phrase_score + question_type_score
 
 
+def deduplicate_scored_candidates(
+    candidates: list["RetrievedQaChunk"],
+) -> list["RetrievedQaChunk"]:
+    """Giữ lại candidate điểm tốt nhất cho mỗi nội dung QA giống hệt.
+
+    Biến đầu vào:
+    - candidates: chunks đã được sắp theo final_score tăng dần.
+
+    Ví dụ output:
+    Hai document trùng nội dung nhưng khác image_id chỉ còn document đầu tiên.
+
+    Cách tự viết lại:
+    Chuẩn hóa page_content thành key; duyệt theo thứ tự điểm đã sort và giữ key
+    xuất hiện đầu tiên để không loại mất bản xếp hạng tốt hơn.
+    """
+
+    unique_candidates: list[RetrievedQaChunk] = []
+    seen_content: set[str] = set()
+    for candidate in candidates:
+        content_key = normalize_for_matching(candidate.page_content)
+        if not content_key or content_key in seen_content:
+            continue
+        seen_content.add(content_key)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
 # =============================================================================
 # Data container
 # =============================================================================
@@ -494,6 +521,11 @@ class QaRetriever:
         ]
         scored_candidates.sort(key=lambda chunk: chunk.final_score)
 
+        # Giữ chunk liên quan nhất cho mỗi nội dung. Cùng một câu QA có thể
+        # được index lặp theo nhiều ảnh/ID; đưa bản sao vào context không giúp
+        # generation và còn làm tăng nguy cơ lặp ý.
+        unique_candidates = deduplicate_scored_candidates(scored_candidates)
+
         reranked_chunks = [
             RetrievedQaChunk(
                 document=chunk.document,
@@ -502,7 +534,7 @@ class QaRetriever:
                 final_score=chunk.final_score,
                 rank=rank,
             )
-            for rank, chunk in enumerate(scored_candidates[:top_k], start=1)
+            for rank, chunk in enumerate(unique_candidates[:top_k], start=1)
         ]
 
         if max_score is None:

@@ -107,7 +107,7 @@ def process_benchmark_file(input_file, output_file):
 
 # --- Execute Script ---
 if __name__ == "__main__":
-    INPUT_PATH = "data/benchmark_candidates.json"
+    INPUT_PATH = "src/evaluation/fixtures/benchmark_candidates.json"
     OUTPUT_PATH = "data/output_benchmark.json"
     
     process_benchmark_file(INPUT_PATH, OUTPUT_PATH)

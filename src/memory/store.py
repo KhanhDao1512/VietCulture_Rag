@@ -61,6 +61,27 @@ DATASET_CATEGORY_LABELS = {
 }
 
 
+def normalize_saved_topic(topic: Any) -> str:
+    """Dọn tiền tố hội thoại và chuẩn hóa một số cách ghi category phổ biến."""
+
+    display_topic = str(topic or "").strip()
+    normalized_topic = normalize_text(display_topic)
+    for prefix in ("voi chu de ", "ve chu de ", "chu de ", "nhom ", "mang "):
+        if normalized_topic.startswith(prefix):
+            normalized_topic = normalized_topic[len(prefix):]
+            display_topic = display_topic[len(prefix):].strip()
+            break
+
+    if normalized_topic in {"tro choi gian dan", "tro choi dan gian"}:
+        return DATASET_CATEGORY_LABELS["tro_choi_dan_gian"]
+
+    for category_label in DATASET_CATEGORY_LABELS.values():
+        if normalized_topic == normalize_text(category_label):
+            return category_label
+
+    return display_topic or str(topic or "").strip()
+
+
 def load_memory_json(memory_text: str | dict[str, Any] | None) -> dict[str, Any]:
     """
     Parse memory từ JSON string/dict và bổ sung field còn thiếu.
@@ -99,6 +120,10 @@ def load_memory_json(memory_text: str | dict[str, Any] | None) -> dict[str, Any]
     ]:
         field_value = memory.get(field_name, [])
         memory[field_name] = field_value if isinstance(field_value, list) else []
+
+    for field_name in ["topics", "keywords"]:
+        normalized_topics = [normalize_saved_topic(topic) for topic in memory[field_name]]
+        memory[field_name] = unique_values(normalized_topics)
 
     return memory
 
@@ -184,6 +209,12 @@ def extract_memory_updates_from_text(user_message: str) -> dict[str, list[str]]:
     normalized_message = normalize_text(user_message)
     categories = detect_categories(normalized_message)
     topics = extract_topics_from_preference_text(user_message)
+    # Sửa hai cách gõ thường gặp của cụm "trò chơi dân gian" trước khi lưu.
+    if "tro choi" in normalized_message and "gian dan" in normalized_message:
+        topics = [
+            "trò chơi dân gian" if normalize_text(topic) == "tro choi gian dan" else topic
+            for topic in topics
+        ]
 
     return {
         "categories": categories,
@@ -209,7 +240,7 @@ def detect_categories(normalized_text: str) -> list[str]:
     detected_categories: list[str] = []
 
     for category_id, patterns in CATEGORY_PATTERNS.items():
-        if any(pattern in normalized_text for pattern in patterns):
+        if any(f" {pattern} " in f" {normalized_text} " for pattern in patterns):
             detected_categories.append(category_id)
 
     return detected_categories
@@ -230,11 +261,19 @@ def extract_topics_from_preference_text(user_message: str) -> list[str]:
 
     text = str(user_message).strip()
     marker_pattern = re.compile(
-        r"(tôi|toi|mình|minh|t)\s+"
-        r"(thích|thich|mê|me|hứng thú|hung thu|quan tâm|quan tam|muốn tìm hiểu về|muon tim hieu ve)\s+",
+        r"^(?:(?:ngoài ra|ngoai ra|bên cạnh đó|ben canh do)\s+)?"
+        r"(?:tôi|toi|mình|minh|em|t)\s+(?:(?:còn|con)\s+)?"
+        r"(?:thích|thich|mê|me|hứng thú|hung thu|quan tâm|quan tam|"
+        r"muốn tìm hiểu|muon tim hieu)(?:\s+(?:về|ve|với|voi))?\s+",
         flags=re.IGNORECASE,
     )
     cleaned_text = marker_pattern.sub("", text).strip()
+    cleaned_text = re.sub(
+        r"^(?:với|voi|về|ve)?\s*(?:chủ đề|chu de|nhóm|nhom|mảng|mang)\s+",
+        "",
+        cleaned_text,
+        flags=re.IGNORECASE,
+    ).strip()
     cleaned_text = re.sub(r"[.!?]+$", "", cleaned_text).strip()
 
     if not cleaned_text or cleaned_text == text:
@@ -405,6 +444,8 @@ def build_memory_summary(memory: dict[str, Any]) -> str:
         for category in memory.get("categories", [])
     ]
     topics = memory.get("topics", []) or memory.get("keywords", [])
+    normalized_categories = {normalize_text(category) for category in categories}
+    topics = [topic for topic in topics if normalize_text(topic) not in normalized_categories]
 
     if not categories and not topics:
         return "Mình chưa lưu được sở thích rõ ràng nào của bạn."
@@ -413,7 +454,7 @@ def build_memory_summary(memory: dict[str, Any]) -> str:
     if categories:
         parts.append("nhóm chủ đề: " + ", ".join(categories))
     if topics:
-        parts.append("từ khóa/chủ đề: " + ", ".join(topics))
+        parts.append("chủ đề cụ thể: " + ", ".join(topics))
 
     return "Mình đang nhớ bạn quan tâm đến " + "; ".join(parts) + "."
 

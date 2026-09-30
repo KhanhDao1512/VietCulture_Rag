@@ -3,7 +3,7 @@ Pipeline LangGraph cho trợ lý VietCulture cá nhân hóa.
 
 Mục đích file:
 File này nối các khối xử lý chính thành một agent hoàn chỉnh:
-memory -> routing intent -> retrieval -> Gemini generation -> chấm groundedness.
+memory -> routing intent -> retrieval -> LLM generation -> chấm groundedness.
 
 Flow tổng quát:
 invoke_agent()
@@ -12,7 +12,8 @@ invoke_agent()
 -> non_rag_intent_node(): xử lý memory/recommendation/chitchat nếu không cần RAG
 -> transform_query(): viết lại câu hỏi để retrieve tốt hơn
 -> rag_node(): lấy documents từ Chroma
--> generate(): gọi Gemini sinh câu trả lời từ documents
+-> normalize_topic_names(): chuẩn hóa tên hiển thị từ metadata
+-> generate(): gọi LLM sinh câu trả lời từ documents
 -> check_hallucination_and_evaluate(): kiểm tra câu trả lời có grounded/useful không
 -> update_memory_node(): kết thúc RAG path, không tự ý lưu sở thích mới
 
@@ -30,6 +31,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -37,6 +39,11 @@ from pydantic import BaseModel, Field
 
 from src.agent.config import AgentSettings, load_agent_settings
 from src.retrieval.qa_retriever import QaRetriever
+from src.normalization.canonical_names import (
+    collect_topic_contexts,
+    collect_topic_names,
+    normalize_topic_names,
+)
 from src.routing.routing import (
     build_grounded_recommendation_message,
     build_langgraph_config,
@@ -46,6 +53,7 @@ from src.routing.routing import (
     build_recommendation_queries,
     build_recommendation_query,
     classify_intent_hybrid,
+    detect_categories,
     dump_memory_json,
     extract_memory_updates_from_text,
     load_memory_json,
@@ -53,6 +61,7 @@ from src.routing.routing import (
     merge_memory,
     rank_recommendation_candidates,
     save_user_memory,
+    normalize_text,
 )
 
 
@@ -71,7 +80,7 @@ class GraphState(TypedDict):
     - route_source: nguồn quyết định route, ví dụ `rule`, `llm`, `rule_fallback`.
     - memory_update_allowed: chỉ True khi user nói rõ sở thích và được phép lưu.
     - transformed_question: câu hỏi đã được rewrite cho retrieval. Nếu không có
-      Gemini thì thường bằng câu hỏi gốc.
+      LLM thì thường bằng câu hỏi gốc.
     - documents: danh sách LangChain Document lấy từ Chroma, dùng làm context.
     - answer: câu trả lời cuối cùng để UI hiển thị.
     - user_id: khóa định danh long-term memory của từng user.
@@ -102,6 +111,7 @@ class GraphState(TypedDict):
     memory_update_allowed: bool
     transformed_question: str
     documents: list[Any]
+    canonical_names: list[dict[str, Any]]
     answer: str
     user_id: str
     user_preferences: str
@@ -110,7 +120,7 @@ class GraphState(TypedDict):
 
 class GradeHallucinations(BaseModel):
     """
-    Schema để Gemini chấm câu trả lời có bám vào documents không.
+    Schema để LLM chấm câu trả lời có bám vào documents không.
 
     Ví dụ output:
     {"binary_score": true, "reasoning": "Câu trả lời được hỗ trợ bởi tài liệu."}
@@ -128,7 +138,7 @@ class GradeHallucinations(BaseModel):
 
 class GradeAnswer(BaseModel):
     """
-    Schema để Gemini chấm câu trả lời có trả lời đúng câu hỏi gốc không.
+    Schema để LLM chấm câu trả lời có trả lời đúng câu hỏi gốc không.
 
     Ví dụ output:
     {"is_relevant": true, "reasoning": "Câu trả lời định nghĩa đúng xe máy."}
@@ -153,8 +163,8 @@ class AgentBundle:
     - app: LangGraph đã compile, dùng để `.invoke()`.
     - settings: toàn bộ config runtime.
     - retriever: object load Chroma + embedding model.
-    - llm_generate: Gemini sinh answer.
-    - llm_grader: Gemini chấm groundedness/usefulness.
+    - llm_generate: model sinh answer.
+    - llm_grader: model chấm groundedness/usefulness.
 
     Ví dụ output của create_agent_bundle():
     AgentBundle(app=<CompiledGraph>, settings=AgentSettings(...), retriever=QaRetriever(...))
@@ -167,13 +177,13 @@ class AgentBundle:
     app: Any
     settings: AgentSettings
     retriever: QaRetriever
-    llm_generate: ChatGoogleGenerativeAI | None
-    llm_grader: ChatGoogleGenerativeAI | None
+    llm_generate: Any | None
+    llm_grader: Any | None
 
 
 def build_context(docs: list[Any]) -> str:
     """
-    Ghép các retrieved documents thành một block context cho prompt Gemini.
+    Ghép các retrieved documents thành một block context cho prompt generation.
 
     Biến đầu vào:
     - docs: list LangChain Document, mỗi Document có `page_content` và `metadata`.
@@ -218,36 +228,70 @@ def build_context(docs: list[Any]) -> str:
     return "\n\n".join(context_blocks)
 
 
-def create_llms(settings: AgentSettings) -> tuple[ChatGoogleGenerativeAI | None, ChatGoogleGenerativeAI | None]:
+def deduplicate_answer_paragraphs(answer: str) -> str:
+    """Bỏ các đoạn trùng chính xác sau chuẩn hóa dấu/khoảng trắng.
+
+    Chỉ xóa duplicate gần như giống hệt; không dùng semantic similarity để
+    tránh vô tình loại hai câu diễn đạt gần nhau nhưng mang thông tin khác.
     """
-    Khởi tạo Gemini model cho generation và grading.
+
+    paragraphs = [part.strip() for part in str(answer or "").split("\n\n")]
+    seen_paragraphs: set[str] = set()
+    unique_paragraphs: list[str] = []
+    for paragraph in paragraphs:
+        normalized_paragraph = normalize_text(paragraph)
+        if not paragraph or not normalized_paragraph or normalized_paragraph in seen_paragraphs:
+            continue
+        seen_paragraphs.add(normalized_paragraph)
+        unique_paragraphs.append(paragraph)
+    return "\n\n".join(unique_paragraphs)
+
+
+def create_llms(settings: AgentSettings) -> tuple[Any | None, Any | None]:
+    """
+    Khởi tạo chat model cho generation và grading theo provider cấu hình.
 
     Biến đầu vào:
-    - settings.google_api_key: nếu rỗng thì không tạo LLM.
-    - settings.gemini_model: tên model Gemini cần dùng.
+    - settings.llm_provider: `vilao` (OpenAI-compatible) hoặc `gemini`.
+    - settings.llm_api_key: nếu rỗng thì không tạo LLM.
+    - settings.llm_model: model ID của provider.
 
     Ví dụ output:
     (ChatGoogleGenerativeAI(...), ChatGoogleGenerativeAI(...))
-    hoặc (None, None) nếu chưa có GOOGLE_API_KEY.
+    hoặc (None, None) nếu chưa có API key.
 
     Cách tự viết lại:
     Kiểm tra API key trước, tạo một model temperature thấp cho answer và một
     model temperature 0 cho grader để kết quả chấm ổn định hơn.
     """
 
-    if not settings.google_api_key:
+    if not settings.llm_api_key:
         return None, None
 
-    llm_generate = ChatGoogleGenerativeAI(
-        model=settings.gemini_model,
-        temperature=0.2,
-        max_retries=2,
-    )
-    llm_grader = ChatGoogleGenerativeAI(
-        model=settings.gemini_model,
-        temperature=0,
-        max_retries=2,
-    )
+    if settings.llm_provider == "gemini":
+        llm_generate = ChatGoogleGenerativeAI(
+            model=settings.llm_model,
+            google_api_key=settings.llm_api_key,
+            temperature=0.2,
+            max_retries=2,
+        )
+        llm_grader = ChatGoogleGenerativeAI(
+            model=settings.llm_model,
+            google_api_key=settings.llm_api_key,
+            temperature=0,
+            max_retries=2,
+        )
+    else:
+        if not settings.llm_base_url:
+            raise ValueError("LLM_BASE_URL is required for an OpenAI-compatible provider")
+        common = {
+            "model": settings.llm_model,
+            "api_key": settings.llm_api_key,
+            "base_url": settings.llm_base_url,
+            "max_retries": 2,
+        }
+        llm_generate = ChatOpenAI(**common, temperature=0.2)
+        llm_grader = ChatOpenAI(**common, temperature=0)
     return llm_generate, llm_grader
 
 
@@ -305,12 +349,21 @@ def create_agent_bundle(project_root: str | None = None) -> AgentBundle:
 Rules:
 - Respond only in Vietnamese.
 - Use only the provided documents to answer the user question.
+- Each key point should appear once; do not repeat the same fact in different wording.
+- Use the canonical display name below consistently when it is available.
+- Canonical display names only normalize spelling; they are not evidence for facts.
+- For topic names, use only a non-empty display name from the canonical list. Never
+  repeat an English, romanized, or unclear source label. If no Vietnamese name is
+  validated, describe the category without repeating that label.
 - If the question asks for a definition, start with a short definition grounded in the documents.
 - Do not add outside knowledge. If the documents are insufficient, say: "Tôi không có đủ thông tin để trả lời câu hỏi này".
 - Use User Preferences only to personalize focus and tone. Do not use preferences as factual evidence.
 
 User Preferences:
 {user_preferences}
+
+Canonical display names (source -> display):
+{canonical_names}
 
 Documents:
 {context}
@@ -452,6 +505,7 @@ Answer:"""
         messages = state.get("messages", [])
         latest_message = messages[-1].content if messages else ""
         current_memory = load_memory_json(state.get("user_preferences", ""))
+        canonical_names: list[dict[str, Any]] = []
 
         if intent == "preference_update":
             if not state.get("memory_update_allowed", False):
@@ -483,7 +537,11 @@ Answer:"""
             answer = build_memory_summary(current_memory)
             documents: list[Any] = []
         elif intent == "recommendation_request":
-            recommendation_queries = build_recommendation_queries(current_memory)
+            requested_categories = detect_categories(normalize_text(latest_message))
+            recommendation_queries = build_recommendation_queries(
+                current_memory,
+                requested_categories=requested_categories or None,
+            )
             if recommendation_queries:
                 retrieved_chunks = []
                 seen_doc_keys: set[str] = set()
@@ -496,27 +554,58 @@ Answer:"""
                     )
                     for chunk in query_chunks:
                         metadata = getattr(chunk.document, "metadata", {}) or {}
+                        canonical_topic = (
+                            metadata.get("canonical_topic")
+                            or metadata.get("topic")
+                            or metadata.get("retrieval_anchor")
+                            or metadata.get("keyword")
+                            or ""
+                        )
                         doc_key = "|".join(
-                            [
-                                str(metadata.get("category", "")),
-                                str(metadata.get("keyword", "")),
-                                str(metadata.get("image_id", "")),
-                                str(metadata.get("question_type", "")),
-                            ]
+                            [str(metadata.get("category", "")), normalize_text(canonical_topic)]
                         )
                         if doc_key in seen_doc_keys:
                             continue
                         seen_doc_keys.add(doc_key)
                         retrieved_chunks.append(chunk)
-                answer = build_grounded_recommendation_message(
-                    current_memory,
-                    retrieved_chunks,
-                )
                 selected_chunks = rank_recommendation_candidates(
                     current_memory,
                     retrieved_chunks,
+                    requested_categories=requested_categories or None,
                 )[:3]
                 documents = [chunk.document for chunk in selected_chunks]
+                topic_names = collect_topic_names(documents)
+                display_names = normalize_topic_names(
+                    topic_names,
+                    llm_generate,
+                    contexts=collect_topic_contexts(documents),
+                    normalize_all=True,
+                )
+                for document in documents:
+                    metadata = getattr(document, "metadata", {}) or {}
+                    source_name = next(
+                        (
+                            str(metadata.get(field_name) or "").strip()
+                            for field_name in (
+                                "canonical_topic", "topic", "retrieval_anchor", "keyword"
+                            )
+                            if str(metadata.get(field_name) or "").strip()
+                        ),
+                        "",
+                    )
+                    metadata["display_topic"] = display_names.get(source_name, "")
+                    canonical_names.append(
+                        {
+                            "source_name": source_name,
+                            "display_name": display_names.get(source_name, ""),
+                        }
+                    )
+                answer = build_grounded_recommendation_message(
+                    current_memory,
+                    selected_chunks,
+                    requested_categories=requested_categories or None,
+                    display_names=display_names,
+                )
             else:
                 answer = build_recommendation_message(current_memory)
                 documents = []
@@ -533,6 +622,7 @@ Answer:"""
         return {
             "answer": answer,
             "documents": documents,
+            "canonical_names": canonical_names,
             "messages": [AIMessage(content=answer)],
         }
 
@@ -611,9 +701,29 @@ REWRITTEN QUERY FOR DATABASE:""",
         )
         return {"documents": retrieve_documents(search_query)}
 
+    def normalize_topic_names_node(state: GraphState) -> dict[str, list[dict[str, Any]]]:
+        """Chuẩn hóa nhãn topic từ documents trước khi đưa sang generation."""
+
+        source_names = collect_topic_names(state.get("documents", []))
+        display_names = normalize_topic_names(
+            source_names,
+            llm_generate,
+            contexts=collect_topic_contexts(state.get("documents", [])),
+            normalize_all=True,
+        )
+        return {
+            "canonical_names": [
+                {
+                    "source_name": source_name,
+                    "display_name": display_names.get(source_name, ""),
+                }
+                for source_name in source_names
+            ]
+        }
+
     def generate(state: GraphState) -> dict[str, Any]:
         """
-        Node gọi Gemini sinh câu trả lời dựa trên retrieved documents.
+        Node gọi LLM sinh câu trả lời dựa trên retrieved documents và tên đã chuẩn hóa.
 
         Biến sử dụng:
         - documents: context lấy từ Chroma.
@@ -637,21 +747,27 @@ REWRITTEN QUERY FOR DATABASE:""",
             return {
                 "answer": (
                     "Chưa cấu hình LLM để sinh câu trả lời RAG. "
-                    "Hãy thiết lập GOOGLE_API_KEY trước khi demo generation."
+                    "Hãy thiết lập LLM_API_KEY (hoặc VILAO_API_KEY) trong .env trước khi demo generation."
                 ),
                 "retry_count": retry_count,
             }
 
         try:
+            canonical_name_lines = "\n".join(
+                f"- {item['source_name']} -> {item['display_name']}"
+                for item in state.get("canonical_names", [])
+            ) or "(không có tên cần chuẩn hóa)"
             answer = rag_chain.invoke(
                 {
                     "context": build_context(state.get("documents", [])),
                     "question": original_question,
                     "user_preferences": state.get("user_preferences", ""),
+                    "canonical_names": canonical_name_lines,
                 }
             )
+            answer = deduplicate_answer_paragraphs(answer)
         except Exception as error:
-            answer = f"Lỗi khi gọi Gemini: {error}"
+            answer = f"Lỗi khi gọi LLM ({settings.llm_provider}/{settings.llm_model}): {error}"
 
         return {"answer": answer, "retry_count": retry_count}
 
@@ -809,6 +925,7 @@ FINAL ANSWER:
     workflow.add_node("non_rag_intent", non_rag_intent_node)
     workflow.add_node("transform", transform_query)
     workflow.add_node("rag", rag_node)
+    workflow.add_node("normalize_topic_names", normalize_topic_names_node)
     workflow.add_node("generate", generate)
     workflow.add_node("update_memory", update_memory_node)
 
@@ -824,7 +941,8 @@ FINAL ANSWER:
     )
     workflow.add_edge("non_rag_intent", END)
     workflow.add_edge("transform", "rag")
-    workflow.add_edge("rag", "generate")
+    workflow.add_edge("rag", "normalize_topic_names")
+    workflow.add_edge("normalize_topic_names", "generate")
     workflow.add_edge("update_memory", END)
     workflow.add_conditional_edges(
         "generate",
@@ -852,6 +970,7 @@ def invoke_agent(
     user_id: str,
     conversation_id: str,
     message: str,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Hàm public để UI/notebook gửi một message vào agent.
@@ -870,14 +989,27 @@ def invoke_agent(
     }
 
     Cách tự viết lại:
-    Tạo input state ban đầu gồm HumanMessage + user_id, rồi gọi
-    `bundle.app.invoke(input_state, config=build_langgraph_config(...))`.
+    Nếu đây là lần đầu thread xuất hiện trong process hiện tại, khôi phục message
+    history từ SQLite rồi thêm câu user mới. Các lượt tiếp theo chỉ thêm câu mới.
     """
-
+    config = build_langgraph_config(user_id, conversation_id)
+    checkpoint = bundle.app.get_state(config)
+    stored_messages = checkpoint.values.get("messages", []) if checkpoint else []
+    input_messages: list[BaseMessage] = []
+    if not stored_messages and history:
+        for item in history:
+            content = str(item.get("content", ""))
+            if not content:
+                continue
+            if item.get("role") == "user":
+                input_messages.append(HumanMessage(content=content))
+            elif item.get("role") == "assistant":
+                input_messages.append(AIMessage(content=content))
+    input_messages.append(HumanMessage(content=message))
     return bundle.app.invoke(
         {
-            "messages": [HumanMessage(content=message)],
+            "messages": input_messages,
             "user_id": user_id,
         },
-        config=build_langgraph_config(user_id, conversation_id),
+        config=config,
     )

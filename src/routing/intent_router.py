@@ -50,8 +50,8 @@ CATEGORY_PATTERNS = {
     "giao_thong": ["giao thong", "xe may", "xe om", "xe buyt", "duong pho"],
     "thu_cong_my_nghe": ["thu cong", "my nghe", "tham coi", "gom", "may tre"],
     "nhac_cu": ["nhac cu", "dan bau", "dan tranh", "dan nguyet"],
-    "van_hoa_dan_gian": ["dan gian", "truyen thuyet", "co tich", "roi nuoc"],
-    "tro_choi_dan_gian": ["tro choi", "keo co", "o an quan", "danh du"],
+    "van_hoa_dan_gian": ["van hoa dan gian", "truyen thuyet", "co tich", "roi nuoc", "dan ca"],
+    "tro_choi_dan_gian": ["tro choi dan gian", "tro choi", "keo co", "o an quan", "danh du"],
     "the_thao_truyen_thong": ["the thao", "vat", "dua thuyen", "vo co truyen"],
 }
 
@@ -199,6 +199,15 @@ def is_preference_update(normalized_message: str) -> bool:
     """
 
     preference_markers = [
+        "ngoai ra toi con thich",
+        "ngoai ra minh con thich",
+        "ben canh do toi con thich",
+        "toi con thich",
+        "minh con thich",
+        "toi con hung thu",
+        "minh con hung thu",
+        "toi con quan tam",
+        "minh con quan tam",
         "toi thich",
         "minh thich",
         "t thich",
@@ -227,10 +236,14 @@ def is_memory_query(normalized_message: str) -> bool:
     """
 
     memory_markers = [
+        "toi co so thich gi",
+        "toi co nhung so thich gi",
+        "so thich cua toi la gi",
+        "so thich cua toi",
+        "cac so thich cua toi",
         "toi thich gi",
         "ban nho gi ve toi",
         "ban biet gi ve toi",
-        "so thich cua toi",
         "toi quan tam gi",
     ]
     return any(marker in normalized_message for marker in memory_markers)
@@ -309,7 +322,7 @@ def has_category_hint(normalized_message: str) -> bool:
     """
 
     return any(
-        pattern in normalized_message
+        f" {pattern} " in f" {normalized_message} "
         for patterns in CATEGORY_PATTERNS.values()
         for pattern in patterns
     )

@@ -21,6 +21,7 @@ import re
 from typing import Any
 
 from src.memory.store import DATASET_CATEGORY_LABELS, load_memory_json
+from src.normalization.canonical_names import has_vietnamese_diacritics
 from src.routing.text_utils import normalize_text, unique_values
 
 
@@ -54,7 +55,10 @@ def build_recommendation_query(memory: dict[str, Any]) -> str:
     return "gợi ý chủ đề văn hóa Việt Nam " + " ".join(focus_terms)
 
 
-def build_recommendation_queries(memory: dict[str, Any]) -> list[str]:
+def build_recommendation_queries(
+    memory: dict[str, Any],
+    requested_categories: list[str] | None = None,
+) -> list[str]:
     """
     Tạo nhiều query nhỏ để recommendation đa dạng theo từng sở thích.
 
@@ -71,6 +75,13 @@ def build_recommendation_queries(memory: dict[str, Any]) -> list[str]:
     """
 
     memory = load_memory_json(memory)
+    if requested_categories:
+        requested_labels = unique_values_by_normalized([
+            DATASET_CATEGORY_LABELS.get(category, category)
+            for category in requested_categories
+        ])
+        return ["gợi ý chủ đề văn hóa Việt Nam " + label for label in requested_labels]
+
     topics = memory.get("topics", []) or memory.get("keywords", [])
     category_labels = [
         DATASET_CATEGORY_LABELS.get(category, category)
@@ -123,6 +134,8 @@ def build_recommendation_message(memory: dict[str, Any]) -> str:
 def build_grounded_recommendation_message(
     memory: dict[str, Any],
     retrieved_chunks: list[Any],
+    requested_categories: list[str] | None = None,
+    display_names: dict[str, str] | None = None,
 ) -> str:
     """
     Format retrieved chunks thành danh sách gợi ý cá nhân hóa.
@@ -146,20 +159,39 @@ def build_grounded_recommendation_message(
 
     memory = load_memory_json(memory)
     recommendation_query = build_recommendation_query(memory)
+    if requested_categories:
+        requested_labels = [
+            DATASET_CATEGORY_LABELS.get(category, category)
+            for category in requested_categories
+        ]
+        recommendation_query = "gợi ý chủ đề " + ", ".join(requested_labels)
     if not recommendation_query:
         return build_recommendation_message(memory)
 
     if not retrieved_chunks:
+        if requested_categories:
+            labels = ", ".join(
+                DATASET_CATEGORY_LABELS.get(category, category)
+                for category in requested_categories
+            )
+            return f"Mình chưa tìm thấy tài liệu phù hợp trong nhóm {labels} để gợi ý có căn cứ."
         return (
             "Mình có sở thích của bạn trong memory, nhưng chưa tìm thấy tài liệu "
             "phù hợp trong dataset để gợi ý có căn cứ."
         )
 
-    user_interest_summary = build_user_interest_summary(memory)
+    user_interest_summary = build_user_interest_summary(
+        memory,
+        focus_categories=requested_categories,
+    )
     recommendations: list[str] = []
     seen_topics: set[str] = set()
 
-    for chunk in rank_recommendation_candidates(memory, retrieved_chunks):
+    for chunk in rank_recommendation_candidates(
+        memory,
+        retrieved_chunks,
+        requested_categories=requested_categories,
+    ):
         document = getattr(chunk, "document", chunk)
         metadata = getattr(document, "metadata", {}) or {}
         content = getattr(document, "page_content", "")
@@ -172,20 +204,32 @@ def build_grounded_recommendation_message(
             or "chủ đề trong dataset"
         )
         topic = str(topic).strip()
+        source_topic = topic
+        if display_names is not None:
+            topic = display_names.get(topic, "")
+            if not topic:
+                continue
+            if topic != source_topic:
+                content = re.sub(
+                    re.escape(source_topic),
+                    topic,
+                    str(content),
+                    flags=re.IGNORECASE,
+                )
         normalized_topic = normalize_text(topic)
         if normalized_topic in seen_topics:
             continue
 
         seen_topics.add(normalized_topic)
         display_topic = prettify_topic_for_display(topic)
-        category = DATASET_CATEGORY_LABELS.get(
-            str(metadata.get("category", "")),
-            str(metadata.get("category", "")),
-        )
+        category_id = str(metadata.get("category", ""))
+        category = DATASET_CATEGORY_LABELS.get(category_id, category_id)
         question_type = str(metadata.get("question_type", "")).strip()
         question = str(metadata.get("question", "")).strip()
         if not question:
             question = extract_content_section(content, ["Question:"])
+        if display_names is not None and topic != source_topic:
+            question = ""
         question = build_suggested_question(
             topic=display_topic,
             raw_question=question,
@@ -193,20 +237,26 @@ def build_grounded_recommendation_message(
         )
 
         short_answer = extract_content_section(content, ["Answer:"])
+        if short_answer and not has_vietnamese_diacritics(short_answer):
+            short_answer = ""
         reason = extract_recommendation_reason(content)
-        fit_reason = build_recommendation_fit_reason(
-            memory=memory,
-            category=category,
-            topic=display_topic,
-            content=content,
-        )
+        if reason and not has_vietnamese_diacritics(reason):
+            reason = ""
+        if requested_categories and category_id in requested_categories:
+            fit_reason = "phù hợp với nhóm bạn vừa yêu cầu."
+        else:
+            fit_reason = build_recommendation_fit_reason(
+                memory=memory,
+                category=category,
+                topic=display_topic,
+                content=content,
+            )
 
         category_phrase = build_category_phrase(category)
         recommendation_lines = [f"{len(recommendations) + 1}. {display_topic}"]
         if fit_reason:
             recommendation_lines.append(
                 "   " + build_recommendation_intro_sentence(
-                    topic=display_topic,
                     category_phrase=category_phrase,
                     fit_reason=fit_reason,
                 )
@@ -226,8 +276,14 @@ def build_grounded_recommendation_message(
     if not recommendations:
         return build_recommendation_message(memory)
 
+    recommendation_count = len(recommendations)
+    recommendation_intro = (
+        "Dưới đây là các gợi ý trong nhóm bạn vừa chọn"
+        if requested_categories
+        else f"Mình chọn {recommendation_count} hướng phù hợp với sở thích đã lưu"
+    )
     return (
-        "Mình chọn 3 hướng khá hợp với sở thích đã lưu"
+        recommendation_intro
         + user_interest_summary
         + ". Bạn có thể bắt đầu từ một trong các chủ đề này:\n\n"
         + "\n\n".join(recommendations)
@@ -255,7 +311,6 @@ def build_category_phrase(category: str) -> str:
 
 
 def build_recommendation_intro_sentence(
-    topic: str,
     category_phrase: str,
     fit_reason: str,
 ) -> str:
@@ -263,27 +318,25 @@ def build_recommendation_intro_sentence(
     Tạo một câu giải thích ngắn thay cho dòng metadata khô cứng.
 
     Biến đầu vào:
-    - topic: tên chủ đề đang gợi ý.
     - category_phrase: cụm category tự nhiên, ví dụ "mảng kiến trúc".
     - fit_reason: lý do match với memory đã build ở bước trước.
 
     Ví dụ output:
-    "Chủ đề này nằm trong mảng ẩm thực và khớp với sở thích Tết đã lưu..."
+    "Thuộc mảng ẩm thực; khớp với sở thích Tết đã lưu..."
 
     Cách tự viết lại:
-    Ghép category + fit_reason thành một câu hoàn chỉnh. Không nhắc tới score,
-    vector, question_type hay metadata để người dùng không thấy cảm giác debug.
+    Dòng tiêu đề đã hiển thị tên chủ đề; chỉ ghép category + fit_reason ở đây
+    để tránh lặp lại tên. Không nhắc score, vector, question_type hay metadata.
     """
 
-    clean_topic = str(topic or "chủ đề này").strip()
     clean_fit_reason = str(fit_reason or "").strip()
     if clean_fit_reason:
         return (
-            f"{clean_topic} nằm trong {category_phrase}; "
+            f"Thuộc {category_phrase}; "
             + clean_fit_reason[:1].lower()
             + clean_fit_reason[1:]
         )
-    return f"{clean_topic} nằm trong {category_phrase}, phù hợp để bạn mở rộng cuộc trò chuyện."
+    return f"Thuộc {category_phrase}, phù hợp để bạn mở rộng cuộc trò chuyện."
 
 
 def unique_values_by_normalized(values: list[str]) -> list[str]:
@@ -312,6 +365,7 @@ def unique_values_by_normalized(values: list[str]) -> list[str]:
 def rank_recommendation_candidates(
     memory: dict[str, Any],
     retrieved_chunks: list[Any],
+    requested_categories: list[str] | None = None,
 ) -> list[Any]:
     """
     Sắp xếp ứng viên recommendation để ưu tiên đa dạng category.
@@ -340,9 +394,13 @@ def rank_recommendation_candidates(
         return "|".join(
             [
                 str(metadata.get("category", "")),
-                normalize_text(metadata.get("keyword") or metadata.get("topic") or ""),
-                str(metadata.get("image_id", "")),
-                str(metadata.get("question_type", "")),
+                normalize_text(
+                    metadata.get("canonical_topic")
+                    or metadata.get("topic")
+                    or metadata.get("retrieval_anchor")
+                    or metadata.get("keyword")
+                    or ""
+                ),
             ]
         )
 
@@ -350,6 +408,13 @@ def rank_recommendation_candidates(
         document = getattr(chunk, "document", chunk)
         metadata = getattr(document, "metadata", {}) or {}
         return str(metadata.get("category", ""))
+
+    if requested_categories:
+        retrieved_chunks = [
+            chunk for chunk in retrieved_chunks
+            if chunk_category(chunk) in requested_categories
+        ]
+        preferred_categories = list(requested_categories)
 
     for category in preferred_categories:
         for chunk in retrieved_chunks:
@@ -395,7 +460,11 @@ def build_suggested_question(
         "mon nay",
         "day la",
     ]
-    if raw_question and not any(marker in normalized_question for marker in generic_markers):
+    if (
+        raw_question
+        and has_vietnamese_diacritics(raw_question)
+        and not any(marker in normalized_question for marker in generic_markers)
+    ):
         return raw_question
 
     normalized_type = normalize_text(question_type)
@@ -444,7 +513,10 @@ def extract_recommendation_reason(page_content: str, max_chars: int = 180) -> st
     return page_content.strip().replace("\n", " ")[:max_chars]
 
 
-def build_user_interest_summary(memory: dict[str, Any]) -> str:
+def build_user_interest_summary(
+    memory: dict[str, Any],
+    focus_categories: list[str] | None = None,
+) -> str:
     """
     Tóm tắt sở thích user thành một cụm ngắn để đưa vào câu mở đầu.
 
@@ -458,10 +530,10 @@ def build_user_interest_summary(memory: dict[str, Any]) -> str:
     """
 
     topics = memory.get("topics", []) or memory.get("keywords", [])
-    categories = [
-        DATASET_CATEGORY_LABELS.get(category, category)
-        for category in memory.get("categories", [])
-    ]
+    category_ids = focus_categories or memory.get("categories", [])
+    categories = [DATASET_CATEGORY_LABELS.get(category, category) for category in category_ids]
+    if focus_categories:
+        topics = []
     focus_terms = remove_redundant_focus_terms(
         unique_values_by_normalized(topics + categories)
     )
@@ -608,6 +680,19 @@ def prettify_topic_for_display(topic: str) -> str:
     if not display_topic:
         return "Chủ đề trong dataset"
 
+    if has_vietnamese_diacritics(display_topic):
+        return display_topic[:1].upper() + display_topic[1:]
+
+    normalized_topic = normalize_text(display_topic)
+    canonical_topics = {
+        "tro choi dan gian": "trò chơi dân gian",
+        "tro choi dan gian viet nam": "trò chơi dân gian Việt Nam",
+        "ram thang gieng": "Rằm tháng Giêng",
+        "nem con": "ném còn",
+    }
+    if normalized_topic in canonical_topics:
+        return canonical_topics[normalized_topic]
+
     replacements = {
         "vat co truyen": "vật cổ truyền",
         "le hoi": "lễ hội",
@@ -631,6 +716,10 @@ def prettify_topic_for_display(topic: str) -> str:
         "cu ta": "cử tạ",
         "the thao": "thể thao",
         "viet nam": "Việt Nam",
+        "tro choi dan gian": "trò chơi dân gian",
+        "dan gian": "dân gian",
+        "ram thang gieng": "Rằm tháng Giêng",
+        "nem con": "ném còn",
     }
 
     normalized_display = normalize_text(display_topic)

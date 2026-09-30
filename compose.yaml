@@ -1,0 +1,25 @@
+services:
+  vietculture:
+    build: .
+    image: vietculture-rag:local
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      QA_CHROMA_DIR: /app/vector_index
+      QA_CHROMA_COLLECTION: vietculture_topic_qa_v1
+      QA_RETRIEVER_DEVICE: cpu
+      CONVERSATION_DB: /app/runtime/conversations.sqlite3
+      MEMORY_FILE: /app/runtime/user_memories.json
+      HF_HOME: /app/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub
+      SENTENCE_TRANSFORMERS_HOME: /app/.cache/huggingface/sentence_transformers
+    volumes:
+      - runtime-data:/app/runtime
+      - hf-cache:/app/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  runtime-data:
+  hf-cache:

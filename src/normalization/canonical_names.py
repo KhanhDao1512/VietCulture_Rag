@@ -13,8 +13,8 @@ collect_topic_names(documents)
 
 Ghi chú quan trọng:
 - LLM chỉ chuẩn hóa nhãn hiển thị, không bổ sung sự kiện văn hóa.
-- Nếu model không chắc hoặc trả tên ngoài candidate list, giữ nguyên tên nguồn.
-- Tên nguồn luôn được giữ trong mapping để truy vết.
+- Hàm chỉ trả alias/mapping đã xác thực; caller luôn giữ tên nguồn để dự phòng.
+- Mapping bị từ chối không được xem là lý do loại retrieved document.
 """
 
 from __future__ import annotations
@@ -189,7 +189,8 @@ def normalize_topic_names(
     """Chuẩn hóa topic bằng alias cục bộ trước, LLM fallback sau.
 
     Hàm không gửi request nếu không có candidate cần chuẩn hóa hoặc LLM chưa
-    được cấu hình. Lỗi API/schema không làm hỏng RAG; tên gốc được giữ lại.
+    được cấu hình. Mapping thiếu khi API/schema lỗi được xử lý ở caller bằng
+    tên nguồn; không được dùng mapping thiếu để bỏ chunk khỏi câu trả lời.
     """
 
     mappings: dict[str, str] = {}

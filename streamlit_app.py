@@ -35,16 +35,16 @@ from urllib.parse import quote
 
 import streamlit as st
 
-from src.agent.graph import create_agent_bundle, invoke_agent
+from src.agent.graph import create_agent_bundle, invoke_agent_safely
 from src.memory.conversation_store import (
     NEW_CONVERSATION_TITLE,
     append_message,
+    choose_conversation_id,
     create_conversation,
     list_conversations,
     load_messages,
 )
 from src.memory.store import DATASET_CATEGORY_LABELS
-from src.normalization.canonical_names import has_vietnamese_diacritics
 from src.routing.text_utils import normalize_text
 
 
@@ -840,9 +840,11 @@ def safe_display_topic(metadata: dict[str, Any]) -> str:
     )
 
 
-def build_recommendation_cards_html(documents: list[Any]) -> str:
+def build_recommendation_cards_html(documents: list[Any], max_cards: int = 5) -> str:
     """
     Tạo HTML card ảnh cho recommendation dựa trên retrieved documents.
+
+    Số card hiển thị khớp với giới hạn 3–5 mục của graph/formatter.
 
     Biến đầu vào:
     - documents: list LangChain Document trong state["documents"].
@@ -866,8 +868,6 @@ def build_recommendation_cards_html(documents: list[Any]) -> str:
             continue
         topic = safe_display_topic(metadata)
         category = str(metadata.get("category", ""))
-        if not has_vietnamese_diacritics(topic):
-            continue
         dedup_key = f"{category}:{normalize_text(topic)}"
         if dedup_key in seen_keys:
             continue
@@ -889,12 +889,27 @@ def build_recommendation_cards_html(documents: list[Any]) -> str:
             f'Từ khóa: {keyword_html}<br>Dạng: {question_type_html}</div>'
             "</div></div>"
         )
-        if len(cards) >= 3:
+        if len(cards) >= min(5, max(3, int(max_cards))):
             break
 
     if not cards:
         return ""
     return '<div class="vc-rec-grid">' + "".join(cards) + "</div>"
+
+
+def _conversation_query_suffix() -> str:
+    """Carry the active user/chat through the app's full-page HTML links."""
+
+    user_id = str(st.session_state.get("vc_user_id", "") or "").strip()
+    conversation_id = str(
+        st.session_state.get("vc_active_conversation", "") or ""
+    ).strip()
+    params = []
+    if user_id:
+        params.append("user_id=" + quote(user_id, safe=""))
+    if conversation_id:
+        params.append("conversation_id=" + quote(conversation_id, safe=""))
+    return ("&" + "&".join(params)) if params else ""
 
 
 def render_header(active_page: str = "home") -> None:
@@ -913,7 +928,7 @@ def render_header(active_page: str = "home") -> None:
     """
 
     nav_items = [
-        ("home", "Trang chủ", "?home=true"),
+        ("home", "Trang chủ", "?home=true" + _conversation_query_suffix()),
         ("topics", "Chủ đề", "#topics"),
         ("about", "Giới thiệu", "#about"),
     ]
@@ -929,7 +944,7 @@ def render_header(active_page: str = "home") -> None:
                 <h1>VietCulture</h1>
             </div>
             <nav class="vc-nav">{nav_links}</nav>
-            <a class="vc-nav-cta" href="?start_chat=true">Trò chuyện</a>
+            <a class="vc-nav-cta" href="?start_chat=true{_conversation_query_suffix()}">Trò chuyện</a>
         </div>
         """,
         unsafe_allow_html=True,
@@ -960,7 +975,7 @@ def build_topic_cards_html() -> str:
         # Đổi thành thẻ <a> truyền query param
         description_html = escape(description)
         cards.append(
-            f'<a href="?topic={topic_param}" target="_self" class="vc-topic-card">'
+            f'<a href="?topic={topic_param}{_conversation_query_suffix()}" target="_self" class="vc-topic-card">'
             f'<img src="{image_url}" alt="{label_html}" loading="lazy">'
             f'<div class="vc-topic-card-copy"><strong>{label_html}</strong>'
             f'<span>{description_html} &nbsp;→</span></div></a>'
@@ -1043,6 +1058,10 @@ def render_debug_state(state: dict[str, Any]) -> None:
         st.write("Transformed question:", state.get("transformed_question"))
         st.write("Tên chuẩn hóa:", state.get("canonical_names", []))
         st.write("Retrieved documents:", len(state.get("documents", [])))
+        if state.get("recommendation_debug"):
+            st.write("Recommendation pipeline:", state["recommendation_debug"])
+        if state.get("agent_error"):
+            st.write("Agent error type:", state["agent_error"])
         for index, document in enumerate(state.get("documents", []), start=1):
             metadata = getattr(document, "metadata", {}) or {}
             with st.expander(
@@ -1062,6 +1081,9 @@ def render_sidebar(bundle: Any) -> tuple[str, str]:
     settings = bundle.settings
     with st.sidebar:
         st.markdown("### VietCulture")
+        requested_user_id = str(st.query_params.get("user_id", "") or "").strip()
+        if requested_user_id and "vc_user_id" not in st.session_state:
+            st.session_state["vc_user_id"] = requested_user_id
         user_id = st.text_input("User ID", value="demo_user_a", key="vc_user_id").strip()
         user_id = user_id or "anonymous"
         memory_db = load_memory_db(settings.memory_file)
@@ -1083,11 +1105,25 @@ def render_sidebar(bundle: Any) -> tuple[str, str]:
             conversations = list_conversations(settings.conversation_db, user_id)
 
         conversation_ids = [item["conversation_id"] for item in conversations]
-        if st.session_state.get("vc_active_user") != user_id:
-            st.session_state["vc_active_user"] = user_id
-            st.session_state["vc_active_conversation"] = conversation_ids[0]
-        elif st.session_state.get("vc_active_conversation") not in conversation_ids:
-            st.session_state["vc_active_conversation"] = conversation_ids[0]
+        user_changed = st.session_state.get("vc_active_user") != user_id
+        requested_conversation_id = str(
+            st.query_params.get("conversation_id", "") or ""
+        ).strip()
+        selected_conversation_id = choose_conversation_id(
+            conversation_ids,
+            requested_id=(
+                requested_conversation_id
+                if user_changed or not st.session_state.get("vc_active_conversation")
+                else None
+            ),
+            stored_id=(
+                None
+                if user_changed
+                else st.session_state.get("vc_active_conversation")
+            ),
+        )
+        st.session_state["vc_active_user"] = user_id
+        st.session_state["vc_active_conversation"] = selected_conversation_id
 
         if st.button("＋ Cuộc trò chuyện mới", key="vc_new_conversation", use_container_width=True):
             conversation_id = f"chat_{uuid.uuid4().hex[:10]}"
@@ -1103,6 +1139,8 @@ def render_sidebar(bundle: Any) -> tuple[str, str]:
                 )
             st.session_state["vc_active_user"] = user_id
             st.session_state["vc_active_conversation"] = conversation_id
+            st.query_params["user_id"] = user_id
+            st.query_params["conversation_id"] = conversation_id
             st.rerun()
 
         title_by_id = {item["conversation_id"]: item["title"] for item in conversations}
@@ -1114,6 +1152,10 @@ def render_sidebar(bundle: Any) -> tuple[str, str]:
             format_func=lambda item: title_by_id.get(item, NEW_CONVERSATION_TITLE),
             label_visibility="collapsed",
         )
+        if st.query_params.get("user_id") != user_id:
+            st.query_params["user_id"] = user_id
+        if st.query_params.get("conversation_id") != selected_id:
+            st.query_params["conversation_id"] = selected_id
 
         st.markdown("---")
         st.caption(f"User đang xem: `{user_id}`")
@@ -1208,7 +1250,7 @@ def render_chat_screen(bundle: Any) -> None:
 
         with st.chat_message("assistant", avatar=str(ASSISTANT_AVATAR)):
             with st.spinner("An đang tìm câu trả lời..."):
-                state = invoke_agent(
+                state = invoke_agent_safely(
                     bundle=bundle,
                     user_id=user_id,
                     conversation_id=conversation_id,
@@ -1219,7 +1261,10 @@ def render_chat_screen(bundle: Any) -> None:
             st.markdown(answer)
             recommendation_cards_html = ""
             if state.get("intent") == "recommendation_request":
-                recommendation_cards_html = build_recommendation_cards_html(state.get("documents", []))
+                recommendation_cards_html = build_recommendation_cards_html(
+                    state.get("documents", []),
+                    max_cards=bundle.settings.recommendation_count,
+                )
                 if recommendation_cards_html:
                     st.markdown(recommendation_cards_html, unsafe_allow_html=True)
 
@@ -1258,6 +1303,17 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
     inject_global_styles()
+
+    # Preserve the selected identity before query params are cleared by the
+    # home/start-chat/topic navigation handlers below.
+    query_user_id = str(st.query_params.get("user_id", "") or "").strip()
+    query_conversation_id = str(
+        st.query_params.get("conversation_id", "") or ""
+    ).strip()
+    if query_user_id and "vc_user_id" not in st.session_state:
+        st.session_state["vc_user_id"] = query_user_id
+    if query_conversation_id and "vc_active_conversation" not in st.session_state:
+        st.session_state["vc_active_conversation"] = query_conversation_id
 
     if "home" in st.query_params:
         st.session_state.started_chat = False

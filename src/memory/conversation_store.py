@@ -134,6 +134,20 @@ def list_conversations(
     return [dict(row) for row in rows]
 
 
+def choose_conversation_id(
+    conversation_ids: list[str],
+    requested_id: str | None = None,
+    stored_id: str | None = None,
+) -> str:
+    """Resolve a stable active chat from URL/session state, then recent fallback."""
+
+    available = set(conversation_ids)
+    for candidate in (requested_id, stored_id):
+        if candidate and candidate in available:
+            return candidate
+    return conversation_ids[0] if conversation_ids else ""
+
+
 def load_messages(
     database_path: str | Path,
     user_id: str,

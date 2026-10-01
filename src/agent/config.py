@@ -36,6 +36,8 @@ class AgentSettings:
     - collection_name: tên collection trong Chroma.
     - embed_model/device: model embedding dùng lúc query runtime.
     - top_k/fetch_k: số kết quả retrieval cuối/candidate ban đầu.
+    - recommendation_count: số gợi ý mục tiêu (3–5).
+    - recommendation_candidate_pool: số ứng viên lấy trước bước chuẩn hóa/lọc.
     - llm_provider/base_url/api_key/model: cấu hình provider OpenAI-compatible hoặc Gemini.
     - use_llm_intent_router: bật/tắt LLM fallback cho intent mơ hồ.
     - llm_intent_confidence_threshold: rule confidence dưới ngưỡng này mới gọi LLM.
@@ -58,6 +60,8 @@ class AgentSettings:
     device: str
     top_k: int
     fetch_k: int
+    recommendation_count: int
+    recommendation_candidate_pool: int
     lexical_weight: float
     retrieval_max_score: float | None
     max_retries: int
@@ -139,6 +143,12 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
     if not conversation_db.is_absolute():
         conversation_db = root / conversation_db
 
+    recommendation_count = min(5, max(3, int(os.getenv("QA_RECOMMENDATION_COUNT", "5"))))
+    recommendation_candidate_pool = max(
+        recommendation_count,
+        int(os.getenv("QA_RECOMMENDATION_CANDIDATE_POOL", "15")),
+    )
+
     return AgentSettings(
         project_root=root,
         memory_file=Path(os.getenv("MEMORY_FILE", root / "user_memories.json")),
@@ -150,6 +160,8 @@ def load_agent_settings(project_root: str | Path | None = None) -> AgentSettings
         device=os.getenv("QA_RETRIEVER_DEVICE", "cpu"),
         top_k=int(os.getenv("QA_TOP_K", "5")),
         fetch_k=int(os.getenv("QA_FETCH_K", "50")),
+        recommendation_count=recommendation_count,
+        recommendation_candidate_pool=recommendation_candidate_pool,
         lexical_weight=float(os.getenv("QA_LEXICAL_WEIGHT", "0.06")),
         retrieval_max_score=float(raw_max_score) if raw_max_score else None,
         max_retries=int(os.getenv("QA_MAX_RETRIES", "3")),

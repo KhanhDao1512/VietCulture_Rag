@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import unittest
+import re
+from unittest.mock import patch
 from types import SimpleNamespace
 
-from src.agent.graph import deduplicate_answer_paragraphs
+from src.agent.graph import deduplicate_answer_paragraphs, invoke_agent_safely
+from src.agent.config import load_agent_settings
 from src.memory.store import merge_memory
 from src.memory.conversation_store import (
     append_message,
+    choose_conversation_id,
     create_conversation,
     list_conversations,
     load_messages,
@@ -64,6 +68,24 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(merged["categories"], ["am_thuc"])
         self.assertEqual(merged["topics"], ["bún chả", "bánh chưng"])
         self.assertEqual(merged["evidence"], ["Tôi thích bún chả và bánh chưng"])
+
+
+class AgentSettingsTests(unittest.TestCase):
+    def test_recommendation_count_is_clamped_and_pool_cannot_be_smaller(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary_directory:
+            with patch.dict(
+                "os.environ",
+                {
+                    "QA_RECOMMENDATION_COUNT": "8",
+                    "QA_RECOMMENDATION_CANDIDATE_POOL": "2",
+                },
+            ):
+                settings = load_agent_settings(Path(temporary_directory))
+        self.assertEqual(settings.recommendation_count, 5)
+        self.assertEqual(settings.recommendation_candidate_pool, 5)
 
 
 class NameNormalizationTests(unittest.TestCase):
@@ -124,8 +146,114 @@ class NameNormalizationTests(unittest.TestCase):
             {},
         )
 
+    def test_normalization_timeout_does_not_prevent_source_name_fallback(self):
+        class FailingLlm:
+            def with_structured_output(self, schema):
+                raise TimeoutError("normalizer timeout")
+
+        names = normalize_topic_names(
+            ["silk painting"], FailingLlm(), normalize_all=True
+        )
+        answer = build_grounded_recommendation_message(
+            memory={"categories": ["thu_cong_my_nghe"]},
+            retrieved_chunks=[
+                fake_document_chunk("thu_cong_my_nghe", "silk painting", "000001")
+            ],
+            display_names=names,
+        )
+        self.assertIn("1. Silk painting", answer)
+        self.assertIn("ý nghĩa gì", answer)
+
+
+class RecommendationCountTests(unittest.TestCase):
+    def test_zero_one_three_and_five_retrieved_topics(self):
+        for result_count in (0, 1, 3, 5):
+            with self.subTest(result_count=result_count):
+                chunks = [
+                    fake_document_chunk(
+                        "kien_truc", f"Công trình kiến trúc số {index}", f"{index:06}"
+                    )
+                    for index in range(1, result_count + 1)
+                ]
+                answer = build_grounded_recommendation_message(
+                    memory={"categories": ["kien_truc"]},
+                    retrieved_chunks=chunks,
+                    max_recommendations=5,
+                )
+                rendered_count = len(re.findall(r"(?m)^\d+\. ", answer))
+                self.assertEqual(rendered_count, result_count)
+
+    def test_partial_name_mapping_keeps_unmapped_candidate(self):
+        chunks = [
+            fake_document_chunk("kien_truc", "Cầu Thê Húc", "000001"),
+            fake_document_chunk("kien_truc", "Hoi An ancient town", "000002"),
+        ]
+        answer = build_grounded_recommendation_message(
+            memory={"categories": ["kien_truc"]},
+            retrieved_chunks=chunks,
+            display_names={"Cầu Thê Húc": "Cầu Thê Húc"},
+            max_recommendations=5,
+        )
+        self.assertIn("1. Cầu Thê Húc", answer)
+        self.assertIn("2. Hoi An ancient town", answer)
+
+    def test_formatter_deduplicates_same_topic_and_fills_to_five(self):
+        chunks = [
+            fake_document_chunk("kien_truc", "Cầu Thê Húc", f"{index:06}")
+            for index in range(1, 4)
+        ] + [
+            fake_document_chunk("kien_truc", f"Địa điểm số {index}", f"{index + 10:06}")
+            for index in range(1, 5)
+        ]
+        answer = build_grounded_recommendation_message(
+            memory={"categories": ["kien_truc"]},
+            retrieved_chunks=chunks,
+            max_recommendations=5,
+        )
+        self.assertEqual(len(re.findall(r"(?m)^\d+\. ", answer)), 5)
+        self.assertEqual(
+            len(re.findall(r"(?m)^\d+\. Cầu Thê Húc$", answer)),
+            1,
+        )
+
+    def test_ui_cards_use_same_five_item_limit_and_keep_fallback_titles(self):
+        from streamlit_app import build_recommendation_cards_html
+
+        documents = []
+        for index in range(1, 7):
+            documents.append(
+                SimpleNamespace(
+                    metadata={
+                        "category": "kien_truc",
+                        "display_topic": f"Topic {index}",
+                        "topic": f"Topic {index}",
+                        "keyword": f"Topic {index}",
+                        "image_id": f"{index:06}",
+                    },
+                    page_content="",
+                )
+            )
+        cards = build_recommendation_cards_html(documents, max_cards=5)
+        self.assertEqual(cards.count('class="vc-rec-card"'), 5)
+        self.assertIn("Topic 1", cards)
+
 
 class ConversationStoreTests(unittest.TestCase):
+    def test_active_conversation_prefers_url_and_keeps_per_tab_selection(self):
+        conversation_ids = ["chat_latest", "chat_older"]
+        first_tab = choose_conversation_id(
+            conversation_ids, requested_id="chat_older", stored_id="chat_latest"
+        )
+        second_tab = choose_conversation_id(
+            conversation_ids, requested_id="chat_latest", stored_id="chat_older"
+        )
+        self.assertEqual(first_tab, "chat_older")
+        self.assertEqual(second_tab, "chat_latest")
+        self.assertEqual(
+            choose_conversation_id(conversation_ids, requested_id="unknown"),
+            "chat_latest",
+        )
+
     def test_transcripts_are_persistent_and_separated_by_user(self):
         from tempfile import TemporaryDirectory
         from pathlib import Path
@@ -189,9 +317,21 @@ class LangGraphHistoryRestoreTests(unittest.TestCase):
         result = invoke_agent(bundle, "user_a", "thread_1", "Lượt kế tiếp", history=[])
         self.assertEqual([message.content for message in result["messages"]], ["Lượt kế tiếp"])
 
+    def test_agent_exception_returns_a_persistable_failure_turn(self):
+        with self.assertLogs("src.agent.graph", level="ERROR"):
+            with patch(
+                "src.agent.graph.invoke_agent", side_effect=RuntimeError("api down")
+            ):
+                result = invoke_agent_safely(
+                    SimpleNamespace(), "user_a", "thread_1", "Câu hỏi được giữ lại"
+                )
+        self.assertEqual(result["intent"], "agent_error")
+        self.assertEqual(result["agent_error"], "RuntimeError")
+        self.assertIn("Câu hỏi vẫn được lưu", result["answer"])
+
 
 class RecommendationNameTests(unittest.TestCase):
-    def test_only_validated_vietnamese_topic_names_are_rendered(self):
+    def test_validated_name_is_preferred_and_failed_name_uses_source_fallback(self):
         chunks = [
             fake_document_chunk("thu_cong_my_nghe", "lacquer Vietnam", "000001"),
             fake_document_chunk("thu_cong_my_nghe", "silk painting", "000002"),
@@ -203,8 +343,8 @@ class RecommendationNameTests(unittest.TestCase):
             display_names={"lacquer Vietnam": "Sơn mài Việt Nam"},
         )
         self.assertIn("Sơn mài Việt Nam", answer)
-        self.assertNotIn("lacquer Vietnam", answer)
-        self.assertNotIn("silk painting", answer)
+        self.assertIn("Silk painting", answer)
+        self.assertEqual(len(re.findall(r"(?m)^\d+\. ", answer)), 2)
 
 class DuplicateHandlingTests(unittest.TestCase):
     def test_reranker_candidates_remove_exact_duplicate_content(self):

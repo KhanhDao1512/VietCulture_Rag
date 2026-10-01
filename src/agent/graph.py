@@ -24,6 +24,7 @@ không được hiểu thành "user thích giao thông".
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
@@ -63,6 +64,9 @@ from src.routing.routing import (
     save_user_memory,
     normalize_text,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class GraphState(TypedDict):
@@ -112,6 +116,7 @@ class GraphState(TypedDict):
     transformed_question: str
     documents: list[Any]
     canonical_names: list[dict[str, Any]]
+    recommendation_debug: dict[str, Any]
     answer: str
     user_id: str
     user_preferences: str
@@ -506,6 +511,7 @@ Answer:"""
         latest_message = messages[-1].content if messages else ""
         current_memory = load_memory_json(state.get("user_preferences", ""))
         canonical_names: list[dict[str, Any]] = []
+        recommendation_debug: dict[str, Any] = {}
 
         if intent == "preference_update":
             if not state.get("memory_update_allowed", False):
@@ -545,13 +551,18 @@ Answer:"""
             if recommendation_queries:
                 retrieved_chunks = []
                 seen_doc_keys: set[str] = set()
-                per_query_top_k = max(3, settings.top_k)
+                retrieved_count = 0
+                per_query_top_k = max(
+                    settings.recommendation_candidate_pool,
+                    settings.top_k,
+                )
                 for recommendation_query in recommendation_queries:
                     query_chunks = retriever.retrieve(
                         query=recommendation_query,
                         top_k=per_query_top_k,
                         fetch_k=settings.fetch_k,
                     )
+                    retrieved_count += len(query_chunks)
                     for chunk in query_chunks:
                         metadata = getattr(chunk.document, "metadata", {}) or {}
                         canonical_topic = (
@@ -572,16 +583,26 @@ Answer:"""
                     current_memory,
                     retrieved_chunks,
                     requested_categories=requested_categories or None,
-                )[:3]
-                documents = [chunk.document for chunk in selected_chunks]
-                topic_names = collect_topic_names(documents)
+                )[: settings.recommendation_candidate_pool]
+                ranked_candidate_count = len(selected_chunks)
+                candidate_documents = [chunk.document for chunk in selected_chunks]
+                topic_names = collect_topic_names(
+                    candidate_documents,
+                    limit=settings.recommendation_candidate_pool,
+                )
                 display_names = normalize_topic_names(
                     topic_names,
                     llm_generate,
-                    contexts=collect_topic_contexts(documents),
+                    contexts=collect_topic_contexts(candidate_documents),
                     normalize_all=True,
                 )
-                for document in documents:
+
+                # Normalization is an optional presentation step. A failed or
+                # partial LLM mapping must not discard retrieved evidence.
+                final_chunks = []
+                seen_display_topics: set[str] = set()
+                for chunk in selected_chunks:
+                    document = chunk.document
                     metadata = getattr(document, "metadata", {}) or {}
                     source_name = next(
                         (
@@ -593,22 +614,60 @@ Answer:"""
                         ),
                         "",
                     )
-                    metadata["display_topic"] = display_names.get(source_name, "")
+                    display_name = display_names.get(source_name, "").strip() or source_name
+                    if not display_name:
+                        continue
+                    display_key = normalize_text(display_name)
+                    if display_key in seen_display_topics:
+                        continue
+                    seen_display_topics.add(display_key)
+                    metadata["display_topic"] = display_name
+                    name_status = "normalized" if source_name in display_names else "source_fallback"
+                    metadata["topic_normalization_status"] = name_status
                     canonical_names.append(
                         {
                             "source_name": source_name,
-                            "display_name": display_names.get(source_name, ""),
+                            "display_name": display_name,
+                            "status": name_status,
                         }
                     )
+                    final_chunks.append(chunk)
+                    if len(final_chunks) >= settings.recommendation_count:
+                        break
+
+                selected_chunks = final_chunks
+                documents = [chunk.document for chunk in selected_chunks]
+                normalized_name_count = sum(
+                    item.get("status") == "normalized" for item in canonical_names
+                )
+                recommendation_debug = {
+                    "queries": recommendation_queries,
+                    "retrieved_chunks": retrieved_count,
+                    "unique_topics_after_retrieval": len(retrieved_chunks),
+                    "ranked_candidates": ranked_candidate_count,
+                    "normalized_names": normalized_name_count,
+                    "source_name_fallbacks": len(canonical_names) - normalized_name_count,
+                    "final_recommendations": len(documents),
+                }
                 answer = build_grounded_recommendation_message(
                     current_memory,
                     selected_chunks,
                     requested_categories=requested_categories or None,
                     display_names=display_names,
+                    max_recommendations=settings.recommendation_count,
                 )
             else:
                 answer = build_recommendation_message(current_memory)
                 documents = []
+                recommendation_debug = {
+                    "queries": [],
+                    "retrieved_chunks": 0,
+                    "unique_topics_after_retrieval": 0,
+                    "ranked_candidates": 0,
+                    "normalized_names": 0,
+                    "source_name_fallbacks": 0,
+                    "final_recommendations": 0,
+                }
         elif intent == "out_of_scope":
             answer = (
                 "Mình chỉ có dữ liệu về văn hóa Việt Nam trong dataset hiện tại. "
@@ -623,6 +682,7 @@ Answer:"""
             "answer": answer,
             "documents": documents,
             "canonical_names": canonical_names,
+            "recommendation_debug": recommendation_debug,
             "messages": [AIMessage(content=answer)],
         }
 
@@ -1013,3 +1073,40 @@ def invoke_agent(
         },
         config=config,
     )
+
+
+def invoke_agent_safely(
+    bundle: AgentBundle,
+    user_id: str,
+    conversation_id: str,
+    message: str,
+    history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return a persistable failure turn instead of leaving a user message orphaned."""
+
+    try:
+        return invoke_agent(
+            bundle=bundle,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message=message,
+            history=history,
+        )
+    except Exception as error:
+        logger.exception("Agent invocation failed for conversation %s", conversation_id)
+        return {
+            "intent": "agent_error",
+            "route_source": "error",
+            "intent_confidence": 0.0,
+            "memory_update_allowed": False,
+            "route_reason": "Agent invocation failed; user turn was preserved.",
+            "transformed_question": message,
+            "canonical_names": [],
+            "documents": [],
+            "user_preferences": "{}",
+            "agent_error": type(error).__name__,
+            "answer": (
+                "Mình chưa xử lý được lượt này do lỗi tạm thời. Câu hỏi vẫn được lưu "
+                "trong cuộc trò chuyện; bạn có thể gửi lại để thử tiếp nhé."
+            ),
+        }

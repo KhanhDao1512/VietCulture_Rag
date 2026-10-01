@@ -21,8 +21,10 @@ Dataset tham chiếu: [Dangindev/viet-cultural-vqa](https://huggingface.co/datas
 - Lưu danh sách hội thoại và transcript theo từng `User ID` bằng SQLite local; sidebar cho phép chuyển user và khôi phục hội thoại.
 - Gợi ý chủ đề văn hóa dựa trên memory và tài liệu retrieve được.
 - Hybrid intent router: rule-based router chạy trước, LLM chỉ fallback khi bật cấu hình.
-- Chuẩn hóa cách hiển thị một số topic trước generation; giữ tên nguồn để truy vết.
+- Chuẩn hóa tên hiển thị sau retrieval; giữ tên nguồn để truy vết và tiếp tục trả lời nếu chuẩn hóa thất bại.
 - Khử chunk trùng nội dung trước generation và recommendation.
+- Recommendation mặc định hiển thị tối đa 5 chủ đề, lấy dư candidates trước khi khử trùng và chuẩn hóa tên.
+- Chuẩn hóa tên là bước trình bày tùy chọn; lỗi LLM không loại bỏ chunk đã retrieve.
 - Streamlit UI gồm màn chào, chat screen, avatar assistant, topic cards và recommendation cards có ảnh từ Hugging Face.
 - Hỗ trợ build Chroma index riêng từ Vietnamese Cultural VQA dataset.
 
@@ -144,6 +146,8 @@ QA_CHROMA_COLLECTION=vietculture_topic_qa_v1
 QA_RETRIEVER_DEVICE=cpu
 QA_TOP_K=5
 QA_FETCH_K=50
+QA_RECOMMENDATION_COUNT=5
+QA_RECOMMENDATION_CANDIDATE_POOL=15
 
 USE_LLM_INTENT_ROUTER=false
 LLM_INTENT_CONFIDENCE_THRESHOLD=0.75
@@ -170,6 +174,8 @@ http://127.0.0.1:8501
 ```
 
 Transcript chat được lưu local trong `conversations.sqlite3` (đường dẫn có thể đổi bằng `CONVERSATION_DB` trong `.env`). SQLite phù hợp cho demo một máy và bị Git ignore. `User ID` chỉ phân tách dữ liệu trong giao diện, chưa phải đăng nhập/xác thực; khi chạy nhiều máy hoặc cần nhiều người dùng thật thì nên dùng database server và lớp xác thực.
+
+Recommendation mặc định nhắm tới 5 gợi ý và lấy tối đa 15 ứng viên trước khi xếp hạng/khử trùng. Có thể đặt `QA_RECOMMENDATION_COUNT` trong khoảng 3–5 và điều chỉnh `QA_RECOMMENDATION_CANDIDATE_POOL` trong `.env`. Nếu dataset chỉ có dưới 3 chủ đề hợp lệ cho truy vấn, ứng dụng hiển thị số tìm được thay vì tự tạo chủ đề không có bằng chứng.
 
 Prompt demo:
 
@@ -237,7 +243,14 @@ Sau khi GitHub Actions publish image lên GitHub Container Registry, có thể c
 ```powershell
 Copy-Item .env.example .env
 # Mở .env và điền LLM_API_KEY
+docker compose -f compose.registry.yaml pull
 docker compose -f compose.registry.yaml up
+```
+
+Nếu chỉ thay cấu hình `.env`, tạo lại container để biến môi trường mới được nạp:
+
+```powershell
+docker compose -f compose.registry.yaml up -d --force-recreate
 ```
 
 ## Ảnh Hugging Face Trong UI

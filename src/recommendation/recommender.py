@@ -136,6 +136,7 @@ def build_grounded_recommendation_message(
     retrieved_chunks: list[Any],
     requested_categories: list[str] | None = None,
     display_names: dict[str, str] | None = None,
+    max_recommendations: int = 5,
 ) -> str:
     """
     Format retrieved chunks thành danh sách gợi ý cá nhân hóa.
@@ -154,7 +155,8 @@ def build_grounded_recommendation_message(
 
     Cách tự viết lại:
     Duyệt top chunks, lấy topic/category/question từ metadata, bỏ trùng topic,
-    tạo lý do tự nhiên, rồi giới hạn khoảng 3 gợi ý để người dùng dễ chọn.
+    tạo lý do tự nhiên, rồi giới hạn theo `max_recommendations` (mặc định 5).
+    Chuẩn hóa tên chỉ đổi nhãn hiển thị; thiếu mapping thì giữ tên từ nguồn.
     """
 
     memory = load_memory_json(memory)
@@ -205,17 +207,15 @@ def build_grounded_recommendation_message(
         )
         topic = str(topic).strip()
         source_topic = topic
-        if display_names is not None:
-            topic = display_names.get(topic, "")
-            if not topic:
-                continue
-            if topic != source_topic:
-                content = re.sub(
-                    re.escape(source_topic),
-                    topic,
-                    str(content),
-                    flags=re.IGNORECASE,
-                )
+        normalized_display_name = (display_names or {}).get(source_topic, "").strip()
+        topic = normalized_display_name or source_topic
+        if normalized_display_name and topic != source_topic:
+            content = re.sub(
+                re.escape(source_topic),
+                topic,
+                str(content),
+                flags=re.IGNORECASE,
+            )
         normalized_topic = normalize_text(topic)
         if normalized_topic in seen_topics:
             continue
@@ -270,7 +270,7 @@ def build_grounded_recommendation_message(
 
         recommendations.append("\n".join(recommendation_lines))
 
-        if len(recommendations) >= 3:
+        if len(recommendations) >= min(5, max(3, int(max_recommendations))):
             break
 
     if not recommendations:
